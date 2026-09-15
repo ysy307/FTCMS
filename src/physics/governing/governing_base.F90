@@ -4,7 +4,6 @@ module physics_governing_base
     use :: module_control
     use :: module_domain
     use :: module_constitutive, only:type_constitutive_manager
-    use :: domain_fe_subcell, only:type_subcell_quadrature
     implicit none
     private
 
@@ -16,8 +15,6 @@ module physics_governing_base
     !> d(p_l)/dX, which is not unity. Lives here because the thermal block
     !> consumes the same flux and must not reference type_hydraulic.
     logical, parameter :: HYDRAULIC_DRIVER_TOTAL_POTENTIAL = .true.
-
-    integer(int32), parameter :: SUBCELL_MAX_REFINEMENT_DEPTH = 5
 
     type :: type_assemble_workspace
         logical, private :: is_initialized = .false.
@@ -66,25 +63,6 @@ module physics_governing_base
         real(real64), allocatable :: work_d_dt(:)
         real(real64), allocatable :: work_matrix(:, :)
 
-        ! --- Interface subcell quadrature (shared level set for THERMAL/HYDRAULIC) ---
-        !> .true. once compute_interface_subcell has populated is_cut and the
-        !> subcell rule for the CURRENT element; reset to .false. at the top of
-        !> initialize() so every new element recomputes. Lets whichever
-        !> governing block (THERMAL or HYDRAULIC) assembles second on this
-        !> workspace reuse the first block's result instead of recomputing the
-        !> level set, so the two blocks can never disagree on the interface.
-        logical, private :: is_interface_subcell_ready = .false.
-        !> .true. iff the current element is cut by the freezing interface
-        !> phi = 0 and the interface-split subcell rule applies to it.
-        logical :: is_cut = .false.
-        !> .true. iff the nodal level set phi changes sign across the current
-        !> element. Refining an element of one sign cannot resolve an interface
-        !> it does not contain, so only these elements are worth refining.
-        logical :: is_sign_mixed = .false.
-        !> Interface-split subcell quadrature of the current element; carries
-        !> its own points and is valid only when is_cut.
-        type(type_subcell_quadrature) :: subcell_quadrature
-        integer(int32), private :: subcell_refinement_depth = 0
 
         integer(int32) :: material_id
         integer(int32) :: element_id
@@ -104,9 +82,6 @@ module physics_governing_base
         procedure, public, pass(self) :: lerp => lerp_states
         procedure, public, pass(self) :: lerp_dqi_dt => lerp_dqi_dt_from_nodes
 
-        procedure, public, pass(self) :: compute_interface_subcell => compute_interface_subcell_assemble_workspace
-        procedure, public, pass(self) :: invalidate_interface_subcell => invalidate_interface_subcell_assemble_workspace
-        procedure, public, pass(self) :: set_subcell_depth => set_subcell_depth_assemble_workspace
 
         procedure, public, pass(self) :: compute_K1 => compute_K1_assemble_workspace
         procedure, public, pass(self) :: compute_K1_lumped => compute_K1_lumped_assemble_workspace
@@ -132,15 +107,6 @@ contains
         type(type_control), intent(in) :: control
 
         integer(int32) :: fe_type
-
-        ! Every call corresponds to exactly one new element: the interface
-        ! subcell cache (compute_interface_subcell) must never leak from the
-        ! previous element into this one.
-        self%is_interface_subcell_ready = .false.
-        self%is_cut = .false.
-        self%is_sign_mixed = .false.
-        self%subcell_refinement_depth = 0
-        call self%subcell_quadrature%reset()
 
         if (.not. self%associated_bdf) then
             call self%set_bdf_info(control)
@@ -189,8 +155,6 @@ contains
         call self%fe%get_num_nodes(self%num_fe_nodes)
         call self%fe%get_num_gauss(self%num_fe_gauss)
         call self%fe%get_dimension(self%num_fe_dimension)
-
-        call self%subcell_quadrature%initialize(SUBCELL_MAX_REFINEMENT_DEPTH)
 
         ! Resize struct arrays only when element type changes
         if (allocated(self%state)) then
@@ -546,92 +510,6 @@ contains
 
     end subroutine lerp_dqi_dt_from_nodes
 
-    !> Compute the freezing-interface level set and interface-split subcell
-    !> quadrature for the CURRENT element, once, so THERMAL and HYDRAULIC -
-    !> the only two callers - always agree on where the interface is.
-    !>
-    !> phi = (s_f - s_m) + eps_s, the same switch
-    !> type_constitutive_manager%calc_freezing_level_set uses to decide ice
-    !> existence (see models_manager.F90 / fusion.F90 for the derivation).
-    !> Guarded by is_interface_subcell_ready: the first governing block that
-    !> assembles on this workspace populates is_cut and the subcell rule; the
-    !> second reuses them unchanged instead of recomputing. Falls back to
-    !> is_cut = .false. (caller uses the standard Gauss rule) when subcell
-    !> quadrature is disabled, the material has no cryo transport, the
-    !> element is not 2D, or build_interface_quadrature_points reports an
-    !> unsupported element family (num_subcell_quadrature_points = 0).
-    subroutine compute_interface_subcell_assemble_workspace(self, physics, material_id, enabled)
-        implicit none
-        class(type_assemble_workspace), intent(inout) :: self
-        !> Per-material constitutive manager (each governing type owns its
-        !> own private instance; both provide the identical level set for a
-        !> given material_id and state, so either may be passed here).
-        class(type_constitutive_manager), intent(in) :: physics
-        integer(int32), intent(in) :: material_id
-        !> Analysis-control gate (input%basic%analysis_controls%
-        !> enable_fringe_subcell_quadrature); the caller's own copy of the flag.
-        logical, intent(in) :: enabled
-
-        real(real64) :: phi_nodes(self%num_fe_nodes)
-        integer(int32) :: i
-        logical :: use_subcell
-
-        if (self%is_interface_subcell_ready) return
-        self%is_interface_subcell_ready = .true.
-        self%is_cut = .false.
-        self%is_sign_mixed = .false.
-        call self%subcell_quadrature%reset()
-
-        use_subcell = enabled .and. physics%has_cryo_transport(material_id) .and. self%num_fe_dimension == 2
-        if (.not. use_subcell) return
-
-        do i = 1, self%num_fe_nodes
-            call physics%calc_freezing_level_set(material_id, self%state(i), phi_nodes(i))
-        end do
-
-        self%is_sign_mixed = any(phi_nodes(1:self%num_fe_nodes) > 0.0d0) .and. &
-                             any(phi_nodes(1:self%num_fe_nodes) <= 0.0d0)
-
-        ! Built for every element, not only sign-mixed ones: gating on mixed
-        ! signs switches between two rules that do not agree in the limit.
-        call self%subcell_quadrature%compute( &
-            self%fe, phi_nodes(1:self%num_fe_nodes), refinement_depth=self%subcell_refinement_depth)
-        self%is_cut = self%subcell_quadrature%is_usable()
-
-    end subroutine compute_interface_subcell_assemble_workspace
-
-    subroutine set_subcell_depth_assemble_workspace(self, refinement_depth)
-        implicit none
-        class(type_assemble_workspace), intent(inout) :: self
-        integer(int32), intent(in) :: refinement_depth
-
-        self%subcell_refinement_depth = min(max(0, refinement_depth), SUBCELL_MAX_REFINEMENT_DEPTH)
-        call self%invalidate_interface_subcell()
-    end subroutine set_subcell_depth_assemble_workspace
-
-    !> Drop the cached interface split so the next compute_interface_subcell
-    !> rebuilds it from the current nodal state.
-    !>
-    !> The cache exists so THERMAL and HYDRAULIC share one level set per
-    !> element. A finite-difference tangent, however, perturbs a nodal unknown
-    !> and re-evaluates the element residual WITHOUT going through the element
-    !> setup that clears the cache, so without this the differentiated residual
-    !> keeps the unperturbed element's interface while the residual the line
-    !> search later evaluates recomputes it. The integrand jumps across that
-    !> interface - the latent heat lives on one side only - so the frozen
-    !> geometry omits a first-order term of the true derivative rather than a
-    !> small one. Measured with the thermal block on the cut rule: the coupled
-    !> solve diverged to the temperature validity walls.
-    subroutine invalidate_interface_subcell_assemble_workspace(self)
-        implicit none
-        class(type_assemble_workspace), intent(inout) :: self
-
-        self%is_interface_subcell_ready = .false.
-        self%is_cut = .false.
-        self%is_sign_mixed = .false.
-        call self%subcell_quadrature%reset()
-    end subroutine invalidate_interface_subcell_assemble_workspace
-
     subroutine compute_K1_assemble_workspace(self, A_gp, local_matrix)
         implicit none
         class(type_assemble_workspace), intent(inout) :: self
@@ -762,11 +640,6 @@ contains
             if (allocated(self%work_L)) deallocate (self%work_L)
             if (allocated(self%work_d_dt)) deallocate (self%work_d_dt)
             if (allocated(self%work_matrix)) deallocate (self%work_matrix)
-
-            self%is_interface_subcell_ready = .false.
-            self%is_cut = .false.
-            self%is_sign_mixed = .false.
-            call self%subcell_quadrature%destroy()
 
             nullify (self%fe)
             self%is_initialized = .false.

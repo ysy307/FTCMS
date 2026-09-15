@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pyvista as pv
 
@@ -38,7 +39,7 @@ DZ_DEFAULT = 0.01
 def _output_interval_minutes(vtu_dir):
     """Read the field-output interval from the project's Output.json.
 
-    The VTU index for a target time is time/interval, so a hard-coded interval
+    The output index for a target time is time/interval, so a hard-coded interval
     silently reads the wrong snapshot whenever the project changes its output
     cadence. Search upward from the VTU directory for Input/Output.json.
     """
@@ -58,37 +59,81 @@ def _output_interval_minutes(vtu_dir):
     )
 
 
-def _vtu_path(vtu_dir, time_hours, output_interval_minutes):
-    file_number = round(time_hours * 60.0 / output_interval_minutes)
-    vtu_dir = Path(vtu_dir)
-    matches = []
-    for path in vtu_dir.glob("Out_*.vtu"):
-        try:
-            suffix = int(path.stem.removeprefix("Out_"))
-        except ValueError:
-            continue
-        if suffix == file_number:
-            matches.append(path)
+# Cell types by the number of corners a cell has, for the two spatial
+# dimensions the solver writes. The file records only the corner indices, so the
+# element is identified by how many of them there are.
+_CELL_TYPES = {
+    (2, 3): pv.CellType.TRIANGLE,
+    (2, 4): pv.CellType.QUAD,
+    (3, 4): pv.CellType.TETRA,
+    (3, 8): pv.CellType.HEXAHEDRON,
+}
+
+
+def _h5_path(output_dir):
+    """The single HDF5 a run writes, searched for under the output directory."""
+    output_dir = Path(output_dir)
+    matches = sorted(set(output_dir.glob("*.h5")) | set(output_dir.glob("Files/*.h5")))
     if len(matches) != 1:
         raise FileNotFoundError(
-            f"Expected one VTU output for {time_hours} h (index {file_number}) "
-            f"in {vtu_dir}, found {len(matches)}"
+            f"Expected exactly one HDF5 output under {output_dir}, found {len(matches)}"
         )
     return matches[0]
 
 
-def _sample_total_water(path, resolution):
-    grid = pv.read(path)
-    if "WaterContent" in grid.point_data:
-        water = np.asarray(grid.point_data["WaterContent"])
-        ice = np.asarray(grid.point_data["IceContent"])
-        grid.point_data["theta_tot"] = water + ICE_TO_WATER_VOLUME_RATIO * ice
-    elif "WaterContent" in grid.cell_data:
-        water = np.asarray(grid.cell_data["WaterContent"])
-        ice = np.asarray(grid.cell_data["IceContent"])
-        grid.cell_data["theta_tot"] = water + ICE_TO_WATER_VOLUME_RATIO * ice
-    else:
-        raise ValueError(f"WaterContent not found in {path}")
+def _timestep_index(time_hours, output_interval_minutes):
+    return round(time_hours * 60.0 / output_interval_minutes)
+
+
+def _read_grid(path, index):
+    """The mesh and the fields of one output time, as an unstructured grid.
+
+    A run writes one self-contained HDF5: the vertices, the corner indices of
+    every cell, and one dataset per quantity indexed by output time. The grid is
+    assembled here so that everything downstream -- the resampling, the depth
+    bins, the metrics -- is the same code whatever wrote the file.
+    """
+    with h5py.File(path, "r") as handle:
+        points = np.asarray(handle["geometry/vertices"])
+        cells = np.asarray(handle["viz/topology/cells"])
+        fields = {}
+        for name in ("WaterContent", "IceContent"):
+            if f"fields/{name}" not in handle:
+                raise ValueError(f"{name} not found in {path}")
+            data = handle[f"fields/{name}"]
+            if index >= data.shape[0]:
+                raise FileNotFoundError(
+                    f"{path} holds {data.shape[0]} output times, none at index {index}"
+                )
+            fields[name] = np.asarray(data[index]).reshape(data.shape[1], -1)[:, 0]
+
+    if points.shape[1] == 2:
+        points = np.column_stack([points, np.zeros(len(points))])
+    # A mesh embedded in three coordinates is still two-dimensional when one of
+    # them never varies: an x-z column is meshed that way so that gravity acts
+    # along a coordinate the solve carries.
+    varying = int(sum(np.ptp(points[:, axis]) > 0.0 for axis in range(3)))
+    corners = cells.shape[1]
+    cell_type = _CELL_TYPES.get((varying, corners))
+    if cell_type is None:
+        raise ValueError(
+            f"No cell type for {corners} corners in {varying} dimensions in {path}"
+        )
+
+    counts = np.full((len(cells), 1), corners, dtype=np.int64)
+    connectivity = np.hstack([counts, cells.astype(np.int64)]).ravel()
+    grid = pv.UnstructuredGrid(
+        connectivity, np.full(len(cells), cell_type, dtype=np.uint8), points
+    )
+    for name, values in fields.items():
+        grid.point_data[name] = values
+    return grid
+
+
+def _sample_total_water(grid, resolution):
+    water = np.asarray(grid.point_data["WaterContent"])
+    ice = np.asarray(grid.point_data["IceContent"])
+    grid.point_data["theta_tot"] = water + ICE_TO_WATER_VOLUME_RATIO * ice
 
     x_min, x_max, y_min, y_max, z_min, z_max = grid.bounds
     nx = max(2, int(np.ceil((x_max - x_min) / resolution)) + 1)
@@ -106,7 +151,7 @@ def _sample_total_water(path, resolution):
         valid &= np.asarray(sampled.point_data["vtkValidPointMask"]).astype(bool)
     points = sampled.points[valid]
     if points.size == 0:
-        raise ValueError(f"No valid sample points found in {path}")
+        raise ValueError("No valid sample points found in the output grid")
     return z_max - points[:, 2], theta[valid]
 
 
@@ -265,9 +310,9 @@ def _sampling_sensitivity(vtu_dir, time_hours, dz, res, interval_minutes):
     not depend on the grid. If it does, the reported profile is a sampling
     artefact rather than a result.
     """
-    path = _vtu_path(vtu_dir, time_hours, interval_minutes)
-    coarse = _depth_profile(*_sample_total_water(path, res), time_hours, dz)
-    fine = _depth_profile(*_sample_total_water(path, 0.5 * res), time_hours, dz)
+    grid = _read_grid(_h5_path(vtu_dir), _timestep_index(time_hours, interval_minutes))
+    coarse = _depth_profile(*_sample_total_water(grid, res), time_hours, dz)
+    fine = _depth_profile(*_sample_total_water(grid, 0.5 * res), time_hours, dz)
     deltas = [
         abs(c["simulated"] - f["simulated"])
         for c, f in zip(coarse, fine)
@@ -354,8 +399,11 @@ def calculate_theta_error_high_precision(
 ):
     if target_time_hours not in TIME_INDEX:
         raise ValueError(f"Invalid time: {target_time_hours} h")
-    target_path = _vtu_path(vtu_base_dir, target_time_hours, output_interval_minutes)
-    depths, theta = _sample_total_water(target_path, res)
+    target_grid = _read_grid(
+        _h5_path(vtu_base_dir),
+        _timestep_index(target_time_hours, output_interval_minutes),
+    )
+    depths, theta = _sample_total_water(target_grid, res)
     rows = _depth_profile(depths, theta, target_time_hours, dz)
 
     print(f"Target Time: {target_time_hours} h (sampling resolution={res} m)")
@@ -375,8 +423,10 @@ def calculate_theta_error_high_precision(
         print(f"Skill vs no-redistribution reference: {skill:+.4f}")
 
     if target_time_hours > 0:
-        initial_path = _vtu_path(vtu_base_dir, 0, output_interval_minutes)
-        initial_depths, initial_theta = _sample_total_water(initial_path, res)
+        initial_grid = _read_grid(
+            _h5_path(vtu_base_dir), _timestep_index(0, output_interval_minutes)
+        )
+        initial_depths, initial_theta = _sample_total_water(initial_grid, res)
         initial_rows = _depth_profile(initial_depths, initial_theta, 0, dz)
         redistribution = _redistribution_metrics(initial_rows, rows, dz)
         result["redistribution"] = redistribution

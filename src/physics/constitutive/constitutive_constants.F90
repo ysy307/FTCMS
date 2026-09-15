@@ -57,7 +57,6 @@ module constitutive_constants
     !> \(p_c^* = \max(\psi_{cap}, \psi_{cryo})\) and its subgradient weights.
     !> Single source of truth for every smooth-max evaluation of the freezing
     !> switch.  It is NOT a physical smoothing scale: elements cut by the
-    !> freezing interface are integrated with the interface-split subcell rule,
     !> so quadrature points never straddle the switch; this epsilon only keeps
     !> the derivative weights defined exactly at \(\psi_{cap} = \psi_{cryo}\).
     real(real64), parameter, public :: suction_blend_epsilon = 1.0d2

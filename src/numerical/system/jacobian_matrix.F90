@@ -228,7 +228,6 @@ contains
             call MatAssemblyBegin(self%system(i)%matrix, MAT_FINAL_ASSEMBLY, ierr)
             call MatAssemblyEnd(self%system(i)%matrix, MAT_FINAL_ASSEMBLY, ierr)
 
-            write (*, '(A,I0,A,I0)') '   [JACDBG] system ', i, ' prescribed rows = ', self%system(i)%num_prescribed
             if (self%system(i)%num_prescribed <= 0) cycle
 
             allocate (rows(self%system(i)%num_prescribed))
@@ -257,6 +256,7 @@ contains
             call MatAssemblyEnd(self%system(i)%matrix, MAT_FINAL_ASSEMBLY, ierr)
         end do
     end subroutine assemble_jacobian_matrix
+
 
     subroutine get_size_jacobian_matrix(self, size)
         implicit none
@@ -478,6 +478,12 @@ contains
 
         call MatSetValues(self%system(sys)%matrix, int(n_local, PETSC_INT_KIND), rows, &
                           int(n_local, PETSC_INT_KIND), cols, dense_val, ADD_VALUES, ierr)
+        ! A refused insertion drops the whole block silently, so it must be seen.
+        if (ierr /= 0) then
+            write (*, '(A,I0,A,I0)') '   [ASSEMBLY] MatSetValues refused element ', element_id, &
+                ', ierr = ', ierr
+            error stop "Element block rejected by the matrix"
+        end if
     end subroutine add_local_jacobian_matrix
 
     subroutine zero_all_jacobian_matrix(self)

@@ -17,38 +17,12 @@ target_sources(SOLVER_DOMAIN PRIVATE
     fe/base/fe_interpolation.F90
     fe/base/fe_compute.F90
     fe/base/fe_coefficients.F90
-    # 1D Finite Elements
-    fe/side/side_interface.F90
-    fe/side/side_first.F90
-    fe/side/side_second.F90
-    # 2D Finite Elements
-    fe/element/element_interface.F90
-    fe/element/element_triangle_first.F90
-    fe/element/element_triangle_second.F90
-    fe/element/element_triangle_third.F90
-    fe/element/element_square_first.F90
-    fe/element/element_square_second.F90
-    fe/element/element_square_second_lagrange.F90
-    fe/element/element_square_third.F90
-    fe/element/element_square_third_serendipity.F90
-    # 3D Finite Elements
-    fe/volume/volume_interface.F90
-    fe/volume/volume_tetra_first.F90
-    fe/volume/volume_tetra_second.F90
-    fe/volume/volume_tetra_third.F90
-    fe/volume/volume_hexa_first.F90
-    fe/volume/volume_hexa_second.F90
-    fe/volume/volume_hexa_second_serendipity.F90
-    fe/volume/volume_hexa_third.F90
-    fe/volume/volume_hexa_third_serendipity.F90
     # FE utilities
     fe/fe_integration.F90
+    fe/fe_petsc.F90
     fe/fe_factory.F90
     fe/fe_manager.F90
     fe/fe.F90
-    # FE subcell quadrature (freezing fringe)
-    fe/subcell/fe_subcell_topology.F90
-    fe/subcell/fe_subcell_quadrature.F90
     # ====================================================
     # 2. Adjacency
     # ====================================================

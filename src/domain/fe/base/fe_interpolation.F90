@@ -9,12 +9,17 @@ contains
         real(real64), intent(in) :: values(:)
         real(real64), intent(inout) :: lerped_value
         integer(int32) :: i
-        real(real64) :: psi_i
+        ! One tabulation of the whole basis. Asking for one function at a time
+        ! costs a round trip per node, and an element whose basis comes from
+        ! outside cannot answer that question at all.
+        real(real64) :: psi(self%num_nodes)
+
+        psi(:) = 0.0d0
+        call self%tabulate(r, psi=psi)
 
         lerped_value = 0.0d0
         do i = 1, self%num_nodes
-            call self%calc_psi(i, r, psi_i)
-            lerped_value = lerped_value + psi_i * values(i)
+            lerped_value = lerped_value + psi(i) * values(i)
         end do
     end subroutine lerp_1d_abst_fe
 
@@ -25,12 +30,14 @@ contains
         real(real64), intent(in) :: values(:, :)
         real(real64), intent(inout) :: lerped_values(:)
         integer(int32) :: i
-        real(real64) :: psi_i
+        real(real64) :: psi(self%num_nodes)
+
+        psi(:) = 0.0d0
+        call self%tabulate(r, psi=psi)
 
         lerped_values(:) = 0.0d0
         do i = 1, self%num_nodes
-            call self%calc_psi(i, r, psi_i)
-            lerped_values(:) = lerped_values(:) + psi_i * values(:, i)
+            lerped_values(:) = lerped_values(:) + psi(i) * values(:, i)
         end do
     end subroutine lerp_2d_abst_fe
 
@@ -41,12 +48,14 @@ contains
         real(real64), intent(in) :: values(:, :, :)
         real(real64), intent(inout) :: lerped_values(:, :)
         integer(int32) :: i
-        real(real64) :: psi_i
+        real(real64) :: psi(self%num_nodes)
+
+        psi(:) = 0.0d0
+        call self%tabulate(r, psi=psi)
 
         lerped_values = 0.0d0
         do i = 1, self%num_nodes
-            call self%calc_psi(i, r, psi_i)
-            lerped_values(:, :) = lerped_values(:, :) + psi_i * values(:, :, i)
+            lerped_values(:, :) = lerped_values(:, :) + psi(i) * values(:, :, i)
         end do
     end subroutine lerp_3d_abst_fe
 

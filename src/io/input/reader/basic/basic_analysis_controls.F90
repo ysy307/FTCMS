@@ -10,7 +10,6 @@ submodule(io_input_basic) input_basic_analysis_controls
     character(*), parameter :: enable_vapor_transport = "enable_vapor_transport"
     character(*), parameter :: coupling_mode = "coupling_mode"
     character(*), parameter :: coupling_modes_strings(2) = [character(len=16) :: "staggered", "monolithic"]
-    character(*), parameter :: enable_fringe_subcell_quadrature = "enable_fringe_subcell_quadrature"
     !!------------------------------------------------------------------------------------------------------------------------------
 contains
     module subroutine read_analysis_controls(self, json)
@@ -34,10 +33,6 @@ contains
 
         buffer(2) = enable_vapor_transport
         call get_json_value(json, join(buffer), self%analysis_controls%enable_vapor_transport, &
-                    is_required=.false., default_value=.true.)
-
-        buffer(2) = enable_fringe_subcell_quadrature
-        call get_json_value(json, join(buffer), self%analysis_controls%enable_fringe_subcell_quadrature, &
                     is_required=.false., default_value=.true.)
 
         if (.not. any(self%analysis_controls%is_active(:))) then

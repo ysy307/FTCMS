@@ -22,6 +22,7 @@ module domain_fe_integration
         type(type_coordinate_dp), allocatable :: gauss(:)
     contains
         procedure, public, pass(self) :: initialize => initialize_type_gauss_integration_rule
+        procedure, public, pass(self) :: adopt_quadrature => adopt_quadrature_gauss_integration
         procedure, public, pass(self) :: destroy => destroy_type_gauss_integration_rule
 
         ! Internal memory management
@@ -34,6 +35,44 @@ module domain_fe_integration
     end type type_gauss_integration_rule
 
 contains
+
+    !> Take the points and weights of a PetscQuadrature as this element's rule.
+    !>
+    !> The basis is tabulated on PETSc's reference cell, so the points it is
+    !> integrated on have to live on that same cell. Asking the element's own
+    !> PetscFE for its quadrature keeps the two together whatever the shape or
+    !> order, which a rule written here cannot promise for a simplex: PETSc's
+    !> reference triangle is not the unit triangle.
+    subroutine adopt_quadrature_gauss_integration(self, quadrature)
+        implicit none
+        class(type_gauss_integration_rule), intent(inout) :: self
+        PetscQuadrature, intent(in) :: quadrature
+
+        PetscErrorCode :: ierr
+        PetscInt :: quad_dim, num_components, num_points
+        PetscReal, pointer :: points(:), weights(:)
+        real(real64) :: coordinate(3)
+        integer(int32) :: point, axis
+
+        nullify (points)
+        nullify (weights)
+        call PetscQuadratureGetData(quadrature, quad_dim, num_components, num_points, &
+                                    points, weights, ierr)
+        if (ierr /= 0) error stop "PETSc quadrature data is unavailable"
+
+        call self%destroy()
+        self%num_gauss = int(num_points, int32)
+        call self%initial_setup(self%num_gauss)
+
+        do point = 1, self%num_gauss
+            coordinate = 0.0d0
+            do axis = 1, int(quad_dim, int32)
+                coordinate(axis) = real(points((point - 1) * quad_dim + axis), real64)
+            end do
+            self%weight(point) = real(weights(point), real64)
+            call self%gauss(point)%set(coordinate(1), coordinate(2), coordinate(3))
+        end do
+    end subroutine adopt_quadrature_gauss_integration
 
     !> Tensor-product Gauss-Legendre points and weights on [-1,1]^dim, taken
     !> from PETSc rather than from a table maintained here.

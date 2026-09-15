@@ -11,7 +11,7 @@
 !> \[ T_{high} = T_r \exp\!\left(\frac{\Psi_w}{L_f}\right), \qquad
 !>    \Psi_w = \frac{P_w}{\rho_w} \]
 !>
-!> These utilities are used by the interface-split subcell quadrature that
+!> These utilities support the freezing-point relations that
 !> integrates the discontinuous suction-switch coefficients in cut elements.
 module models_phase_change_chemical_potential
     use, intrinsic :: iso_fortran_env

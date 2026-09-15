@@ -119,7 +119,7 @@ contains
     !> give K_TH(:,b) and K_HH(:,b) together.
     !>
     !> Each perturbation goes through set_and_refresh (full nodal update, then
-    !> Gauss-point update and subcell invalidation):
+    !> Gauss-point update):
     !> hydraulic_matrix.F90's assemble_local_picard_hydraulic reads
     !> workspace%state(i) directly for the diffusion, coupling-diffusion and
     !> advective coefficients and for effective_suction and its tangents, so F_H,
@@ -415,9 +415,6 @@ contains
                                           local_F_T=local_F_T, local_F_H=local_F_H, &
                                           coordinates=elem_coords, raw_coordinates=raw_elem_coords, &
                                           connectivity=connectivity)
-            if (allocated(self%subcell_active_depth)) then
-                call workspace%set_subcell_depth(self%subcell_active_depth(elem_id))
-            end if
 
             if (.not. self%control%is_target(PHYSICS_TYPES%THERMAL, workspace%material_id)) cycle
             if (.not. self%control%is_target(PHYSICS_TYPES%HYDRAULIC, workspace%material_id)) cycle
@@ -621,7 +618,6 @@ contains
         ! differentiated residual use the same rule the residual itself would
         ! be assembled with at this state; see the invalidate routine's
         ! docstring for why the omitted term is first order, not small.
-        call workspace%invalidate_interface_subcell()
     end subroutine set_and_refresh
 
     !> Evaluate the element residual only, leaving the matrix blocks untouched.

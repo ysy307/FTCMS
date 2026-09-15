@@ -261,6 +261,84 @@ contains
 
     end subroutine compute_transient_term_thermal
 
+    !> Calculate the apparent heat capacity \( C_{app} = dU/dT \)
+    !>
+    !> Mathematical definition:
+    !> - The analytical tangent of the enthalpy density, phase by phase, with
+    !>   the latent heat of fusion and of vaporization included through
+    !>   \( dQ_i/dT \) and \( dQ_v/dT \)
+    !>
+    !> It reads only the current state, never the time history, so a caller
+    !> that discretises the time derivative itself can use it directly.
+    !> compute_mass_term_thermal calls it for the tangent scheme.
+    module subroutine compute_apparent_capacity_thermal(self, material_id, state, C_app)
+        implicit none
+        !> Thermal governing equation object
+        class(type_thermal), intent(in) :: self
+        !> Material identifier
+        integer(int32), intent(in) :: material_id
+        !> Thermodynamic state
+        type(type_state), intent(in) :: state
+        !> Apparent heat capacity
+        !> Overwritten on exit
+        real(real64), intent(inout) :: C_app
+
+        real(real64) :: temperature
+        real(real64) :: porosity, Qw, Qi, Qv
+        real(real64) :: rho_s, rho_w, rho_i
+        real(real64) :: c_s, c_w, c_i, c_v
+        real(real64) :: dQw_dT, dQi_dT, dQv_dT, Lf, Lv
+        logical :: has_rho_w
+
+        call state%temperature%get(temperature)
+
+        C_app = 0.0d0
+        has_rho_w = .false.
+
+        ! --- Analytical tangent (apparent heat capacity) C_app = dU/dT (always) ---
+        call state%get(porosity=porosity, water_content=Qw, &
+                       ice_content=Qi, vapor_content=Qv)
+
+        ! Solid
+        if (porosity > 0.0d0) then
+            call self%physics%get_density_solid(material_id, rho_s)
+            call self%physics%get_specific_heat_solid(material_id, c_s)
+            C_app = C_app + rho_s * c_s * (1.0d0 - porosity)
+        end if
+
+        ! Water
+        if (Qw > 0.0d0) then
+            call self%physics%calc_density_water(state, rho_w)
+            has_rho_w = .true.
+            call self%physics%calc_specific_heat_water(state, c_w)
+            call state%dQw_dT%get(dQw_dT)
+            C_app = C_app + rho_w * c_w * (Qw + temperature * dQw_dT)
+        end if
+
+        ! Ice (including latent heat derivative).
+        ! Additional segregation-sink latent heat is handled by an explicit source.
+        call state%dQi_dT%get(dQi_dT)
+        if (Qi > 0.0d0 .or. dQi_dT /= 0.0d0) then
+            call self%physics%calc_density_ice(state, rho_i)
+            call self%physics%calc_specific_heat_ice(state, c_i)
+            C_app = C_app + rho_i * c_i * (Qi + temperature * dQi_dT)
+            call self%physics%calc_latent_heat_fusion(material_id, state, Lf)
+            C_app = C_app - Lf * rho_i * dQi_dT
+        end if
+
+        ! Vapor (including latent heat derivative)
+        if (Qv > 0.0d0) then
+            if (.not. has_rho_w) then
+                call self%physics%calc_density_water(state, rho_w)
+                has_rho_w = .true.
+            end if
+            call self%physics%calc_specific_heat_vapor(state, c_v)
+            call self%physics%calc_latent_heat_vaporization(material_id, state, Lv)
+            call state%dQv_dT%get(dQv_dT)
+            C_app = C_app + rho_w * c_v * (Qv + temperature * dQv_dT) + Lv * rho_w * dQv_dT
+        end if
+    end subroutine compute_apparent_capacity_thermal
+
     !> Calculate heat capacity coefficient \( C_{TT} = \frac{dU}{dT} \)
     !>
     !> Mathematical definition:
@@ -284,13 +362,6 @@ contains
         real(real64), pointer, contiguous, dimension(:) :: temperature_history
         real(real64), pointer, contiguous, dimension(:) :: pressure_history
         real(real64), pointer, contiguous, dimension(:) :: porosity_history
-
-        ! Tangent variables
-        real(real64) :: porosity, Qw, Qi, Qv
-        real(real64) :: rho_s, rho_w, rho_i
-        real(real64) :: c_s, c_w, c_i, c_v
-        real(real64) :: dQw_dT, dQi_dT, dQv_dT, Lf, Lv
-        logical :: has_rho_w
 
         ! Secant variables
         real(real64) :: C_TT_current, C_TT_old, C_TT_secant, dT
@@ -323,51 +394,7 @@ contains
             dT = 0.0d0
         end if
 
-        C_TT = 0.0d0
-        has_rho_w = .false.
-
-        ! --- Analytical tangent (apparent heat capacity) C_app = dU/dT (always) ---
-        call state%get(porosity=porosity, water_content=Qw, &
-                       ice_content=Qi, vapor_content=Qv)
-
-        ! Solid
-        if (porosity > 0.0d0) then
-            call self%physics%get_density_solid(material_id, rho_s)
-            call self%physics%get_specific_heat_solid(material_id, c_s)
-            C_TT = C_TT + rho_s * c_s * (1.0d0 - porosity)
-        end if
-
-        ! Water
-        if (Qw > 0.0d0) then
-            call self%physics%calc_density_water(state, rho_w)
-            has_rho_w = .true.
-            call self%physics%calc_specific_heat_water(state, c_w)
-            call state%dQw_dT%get(dQw_dT)
-            C_TT = C_TT + rho_w * c_w * (Qw + temperature * dQw_dT)
-        end if
-
-        ! Ice (including latent heat derivative).
-        ! Additional segregation-sink latent heat is handled by an explicit source.
-        call state%dQi_dT%get(dQi_dT)
-        if (Qi > 0.0d0 .or. dQi_dT /= 0.0d0) then
-            call self%physics%calc_density_ice(state, rho_i)
-            call self%physics%calc_specific_heat_ice(state, c_i)
-            C_TT = C_TT + rho_i * c_i * (Qi + temperature * dQi_dT)
-            call self%physics%calc_latent_heat_fusion(material_id, state, Lf)
-            C_TT = C_TT - Lf * rho_i * dQi_dT
-        end if
-
-        ! Vapor (including latent heat derivative)
-        if (Qv > 0.0d0) then
-            if (.not. has_rho_w) then
-                call self%physics%calc_density_water(state, rho_w)
-                has_rho_w = .true.
-            end if
-            call self%physics%calc_specific_heat_vapor(state, c_v)
-            call self%physics%calc_latent_heat_vaporization(material_id, state, Lv)
-            call state%dQv_dT%get(dQv_dT)
-            C_TT = C_TT + rho_w * c_v * (Qv + temperature * dQv_dT) + Lv * rho_w * dQv_dT
-        end if
+        call self%compute_apparent_capacity(material_id, state, C_TT)
 
         ! Modified Picard uses the physical tangent evaluated at the current
         ! iterate. A pure secant remains available only when explicitly

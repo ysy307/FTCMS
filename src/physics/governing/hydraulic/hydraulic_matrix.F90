@@ -1,9 +1,6 @@
 submodule(physics_governing_hydraulic) hydraulic_matrix
     implicit none
 
-    !> TEMPORARY Step-0 verification diagnostic (see report_subcell_debug_counts_hydraulic).
-    !> Default .false.; flip to .true. only to re-measure the firing rate.
-    logical, parameter :: DEBUG_SUBCELL_COUNTER = .false.
 
     integer(int32), save :: dbg_elements_considered = 0
     integer(int32), save :: dbg_elements_cut = 0
@@ -59,7 +56,6 @@ contains
     !> The transport coefficients can change sharply across the freezing
     !> interface, where ice first appears (see the cut-detection block below
     !> for the level-set definition).  Elements cut by the
-    !> interface are therefore integrated with the interface-split subcell rule
     !> (build_interface_quadrature_points), which REPLACES the standard Gauss
     !> rule for the pressure, temperature, and gravity fluxes in those elements.
     !> Using one quadrature partition for all three parts of the Darcy flux
@@ -67,10 +63,8 @@ contains
     !> different points.
     !>
     !> The storage term (C_eq -> K1, and its residual counterpart d(Theta)/dt)
-    !> is likewise moved onto the subcell rule for cut elements, in the SAME
     !> q_s loop as the fluxes: dTheta/dp collapses across the same front the
     !> flux coefficients do, so sampling it at Gauss points would reintroduce
-    !> the discrete imbalance the flux subcell rule was built to remove.
     !> The segregation sink keeps the standard Gauss rule in all elements.
     !>
     !> In Modified Picard, the transport coefficients are frozen at the current
@@ -88,11 +82,8 @@ contains
         integer(int32) :: i, j, d, n_nodes, n_gauss, n_dim, ierr
         real(real64) :: bdf0, dt_local
 
-        ! --- Interface-split subcell variables ---
-        integer(int32) :: num_subcell_quadrature_points, q_s
         real(real64) :: xi_sub, eta_sub, weight_sub
         logical :: is_plus_side_sub
-        logical :: use_subcell, is_cut
         real(real64) :: phi_nodes(workspace%num_fe_nodes)
         real(real64) :: porosity_nodes(workspace%num_fe_nodes)
         real(real64) :: T_q_sub, P_q_sub, porosity_q_sub, Qi_q_sub
@@ -106,7 +97,6 @@ contains
         real(real64) :: dpsi_dx_sub(workspace%num_fe_dimension, workspace%num_fe_nodes)
         type(type_coordinate_dp) :: r_sub
         type(type_state) :: state_sub
-        ! --- Storage term on the subcell rule (Step 3: C_eq has the same
         !     sub-element front as the flux coefficients above) ---
         real(real64) :: psi_sub(workspace%num_fe_nodes)
         real(real64) :: C_eq_sub, C_HT_storage_sub, d_dt_sub
@@ -185,43 +175,6 @@ contains
         !    temperature T_high(p_w) - is what keeps "cut" elements from
         !    drifting away from where the constitutive split actually places
         !    the phase change.
-        !    The subcell split supports 2D triangle/quad elements; other
-        !    element families fall back to the standard rule.
-        !
-        !    workspace%compute_interface_subcell computes this ONCE per
-        !    element and caches it on the workspace: THERMAL calls the same
-        !    method with its own (identical) constitutive manager, so the two
-        !    blocks always agree on where the interface is and never redo the
-        !    per-node calc_freezing_level_set evaluation twice.
-        ! ----------------------------------------------------------------
-        use_subcell = self%enable_fringe_subcell_quadrature &
-                      .and. self%physics%has_cryo_transport(workspace%material_id) &
-                      .and. n_dim == 2
-        call workspace%compute_interface_subcell(self%physics, workspace%material_id, &
-                                                 self%enable_fringe_subcell_quadrature)
-        is_cut = workspace%is_cut
-        call workspace%subcell_quadrature%get_num_points(num_subcell_quadrature_points)
-
-        if (DEBUG_SUBCELL_COUNTER .and. use_subcell) then
-            ! Diagnostic-only: phi is recomputed locally here (cheap, O(n_nodes))
-            ! rather than exposed by compute_interface_subcell, since this
-            ! counter is dead in production (DEBUG_SUBCELL_COUNTER = .false.).
-            do i = 1, n_nodes
-                call self%physics%calc_freezing_level_set(workspace%material_id, workspace%state(i), phi_nodes(i))
-            end do
-            !$OMP ATOMIC UPDATE
-            dbg_elements_considered = dbg_elements_considered + 1
-            if (is_cut) then
-                !$OMP ATOMIC UPDATE
-                dbg_elements_cut = dbg_elements_cut + 1
-            end if
-            !$OMP CRITICAL(subcell_debug_phi)
-            dbg_phi_min = min(dbg_phi_min, minval(phi_nodes(1:n_nodes)))
-            dbg_phi_max = max(dbg_phi_max, maxval(phi_nodes(1:n_nodes)))
-            dbg_abs_phi_min = min(dbg_abs_phi_min, minval(abs(phi_nodes(1:n_nodes))))
-            !$OMP END CRITICAL(subcell_debug_phi)
-        end if
-
         ! ----------------------------------------------------------------
         ! 1. Gauss loop: storage and sink terms at all Gauss points;
         !    flux coefficients only for uncut elements.
@@ -299,7 +252,7 @@ contains
         ! coefficient that varies exponentially: it is exact for exponential K
         ! between two points and cannot exceed the larger nodal value.
         ! ----------------------------------------------------------------
-        ! Element transport coefficients, shared by the standard and subcell
+        ! Element transport coefficients.
         ! paths so a cut/uncut flip does not change the discrete operator.
         do i = 1, n_nodes
             coeff_sub_mat(:, :) = 0.0d0
@@ -341,15 +294,13 @@ contains
         D_HH_gas_elem = 0.0d0
         if (gas_flux_needed) D_HH_gas_elem = geometric_mean(D_HH_gas_node(1:n_nodes))
 
-        if (.not. is_cut) then
-            do i = 1, n_gauss
-                do d = 1, n_dim
-                    workspace%work_D(d, d, i) = D_HH_elem
-                    work_D_HT(d, d, i) = D_HT_elem
-                end do
-                workspace%work_V(:, i) = V_elem_mag * V_dir(:)
+        do i = 1, n_gauss
+            do d = 1, n_dim
+                workspace%work_D(d, d, i) = D_HH_elem
+                work_D_HT(d, d, i) = D_HT_elem
             end do
-        end if
+            workspace%work_V(:, i) = V_elem_mag * V_dir(:)
+        end do
 
         ! p_w is the total-water-equivalent pressure of the closure, so the
         ! liquid pressure is p_l = -s_eff. s_eff is read from the state the
@@ -372,259 +323,94 @@ contains
         ! ----------------------------------------------------------------
         ! 2. Mass Matrix K1 (LHS, factor bdf0).
         !    Uncut element: standard Gauss rule (C_eq/C_HT from step 1).
-        !    Cut element: interface-split subcell rule, built in the SAME
         !    q_s loop as the fluxes below (mat_C_sub/mat_C_HT_sub).
         ! ----------------------------------------------------------------
-        if (.not. is_cut) then
-            call workspace%compute_K1(workspace%work_C, workspace%work_matrix)
-            if (present(K_HH)) then
-                do j = 1, n_nodes
-                    do i = 1, n_nodes
-                        call K_HH%set(MATRIX_OPS%ADD, i, j, bdf0 * workspace%work_matrix(i, j))
-                    end do
+        call workspace%compute_K1(workspace%work_C, workspace%work_matrix)
+        if (present(K_HH)) then
+            do j = 1, n_nodes
+                do i = 1, n_nodes
+                    call K_HH%set(MATRIX_OPS%ADD, i, j, bdf0 * workspace%work_matrix(i, j))
                 end do
-            end if
+            end do
+        end if
 
-            if (coupling_mass_needed) then
-                call workspace%compute_K1(work_C_HT, workspace%work_matrix)
-                do j = 1, n_nodes
-                    do i = 1, n_nodes
-                        call K_HT%set(MATRIX_OPS%ADD, i, j, bdf0 * workspace%work_matrix(i, j))
-                    end do
+        if (coupling_mass_needed) then
+            call workspace%compute_K1(work_C_HT, workspace%work_matrix)
+            do j = 1, n_nodes
+                do i = 1, n_nodes
+                    call K_HT%set(MATRIX_OPS%ADD, i, j, bdf0 * workspace%work_matrix(i, j))
                 end do
-            end if
+            end do
         end if
 
         ! ----------------------------------------------------------------
         ! 4. Flux terms.
         !    Uncut element: standard Gauss rule (coefficients from step 1).
-        !    Cut element: interface-split subcell rule for D_HH, D_HT, and
         !    gravity advection (replacement, so nothing is double-counted).
         ! ----------------------------------------------------------------
-        if (.not. is_cut) then
-            if (coupling_flux_needed) then
-                call workspace%compute_K2(work_D_HT, work_matrix_coupling)
-                if (present(K_HT)) then
-                    do j = 1, n_nodes
-                        do i = 1, n_nodes
-                            call K_HT%set(MATRIX_OPS%ADD, i, j, work_matrix_coupling(i, j))
-                        end do
-                    end do
-                end if
-                if (present(F_H)) then
-                    workspace%work_vec(:) = 0.0d0
-                    call matvec(work_matrix_coupling, workspace%T_node, workspace%work_vec, ierr)
-                    local_vec_res(:) = local_vec_res(:) + workspace%work_vec(:)
-                end if
-            end if
-
-            call workspace%compute_K2(workspace%work_D, workspace%work_matrix)
-            ! Column j of K2(D_HH) scaled by dP_gen/dp_w.
-            if (present(K_HH)) then
+        if (coupling_flux_needed) then
+            call workspace%compute_K2(work_D_HT, work_matrix_coupling)
+            if (present(K_HT)) then
                 do j = 1, n_nodes
                     do i = 1, n_nodes
-                        call K_HH%set(MATRIX_OPS%ADD, i, j, workspace%work_matrix(i, j) * dPgen_dP_node(j))
-                    end do
-                end do
-            end if
-            ! K_HT also takes K2(D_HH) scaled by dP_gen/dT, independent of the
-            ! thermo-osmotic K2(D_HT) added above.
-            if (coupling_block_needed) then
-                do j = 1, n_nodes
-                    do i = 1, n_nodes
-                        call K_HT%set(MATRIX_OPS%ADD, i, j, workspace%work_matrix(i, j) * dPgen_dT_node(j))
-                    end do
-                end do
-            end if
-            if (present(F_H)) then
-                do i = 1, n_nodes
-                    do j = 1, n_nodes
-                        local_vec_res(i) = local_vec_res(i) + workspace%work_matrix(i, j) * P_gen_node(j)
-                    end do
-                end do
-            end if
-
-            ! Vapour flux is driven by the gas pressure, so its column scale is
-            ! unity and it contributes nothing to K_HT.
-            if (gas_flux_needed) then
-                work_D_gas(:, :, :) = 0.0d0
-                do i = 1, n_gauss
-                    do d = 1, n_dim
-                        work_D_gas(d, d, i) = D_HH_gas_elem
-                    end do
-                end do
-                call workspace%compute_K2(work_D_gas, work_matrix_gas)
-                if (present(K_HH)) then
-                    do j = 1, n_nodes
-                        do i = 1, n_nodes
-                            call K_HH%set(MATRIX_OPS%ADD, i, j, work_matrix_gas(i, j))
-                        end do
-                    end do
-                end if
-                if (present(F_H)) then
-                    workspace%work_vec(:) = 0.0d0
-                    call matvec(work_matrix_gas, workspace%P_node, workspace%work_vec, ierr)
-                    local_vec_res(:) = local_vec_res(:) + workspace%work_vec(:)
-                end if
-            end if
-        else
-            do i = 1, n_nodes
-                call workspace%state(i)%porosity%get(porosity_nodes(i))
-            end do
-
-            mat_HH_sub(:, :) = 0.0d0
-            mat_HH_gas_sub(:, :) = 0.0d0
-            mat_HT_sub(:, :) = 0.0d0
-            vec_V_sub(:) = 0.0d0
-            mat_C_sub(:, :) = 0.0d0
-            mat_C_HT_sub(:, :) = 0.0d0
-            vec_ddt_sub(:) = 0.0d0
-
-            ! Gather nodal BDF history once (T, P, ice content only -
-            ! compute_transient_term_mixed does not read porosity history).
-            ! Unset node history contributes zero, exactly as lerp_states
-            ! fills state_gp's history (see governing_base.F90).
-            n_hist = workspace%bdf_order + 1
-            T_hist_node(:, :) = 0.0d0
-            P_hist_node(:, :) = 0.0d0
-            Qi_hist_node(:, :) = 0.0d0
-            do i = 1, n_nodes
-                nullify (hist_ptr)
-                hist_is_set = .false.
-                call workspace%state(i)%temperature_history%get(hist_ptr, is_set=hist_is_set)
-                if (hist_is_set .and. associated(hist_ptr)) then
-                    hlen = min(size(hist_ptr), n_hist)
-                    T_hist_node(1:hlen, i) = hist_ptr(1:hlen)
-                end if
-
-                nullify (hist_ptr)
-                hist_is_set = .false.
-                call workspace%state(i)%pressure_history%get(hist_ptr, is_set=hist_is_set)
-                if (hist_is_set .and. associated(hist_ptr)) then
-                    hlen = min(size(hist_ptr), n_hist)
-                    P_hist_node(1:hlen, i) = hist_ptr(1:hlen)
-                end if
-
-                nullify (hist_ptr)
-                hist_is_set = .false.
-                call workspace%state(i)%ice_content_history%get(hist_ptr, is_set=hist_is_set)
-                if (hist_is_set .and. associated(hist_ptr)) then
-                    hlen = min(size(hist_ptr), n_hist)
-                    Qi_hist_node(1:hlen, i) = hist_ptr(1:hlen)
-                end if
-            end do
-
-            do q_s = 1, num_subcell_quadrature_points
-                call workspace%subcell_quadrature%get_point(q_s, xi_sub, eta_sub, weight_sub, is_plus_side_sub)
-                r_sub%x = xi_sub
-                r_sub%y = eta_sub
-                r_sub%z = 0.0d0
-
-                call workspace%fe%lerp(r_sub, workspace%T_node(1:n_nodes), T_q_sub)
-                call workspace%fe%lerp(r_sub, workspace%P_node(1:n_nodes), P_q_sub)
-                call workspace%fe%lerp(r_sub, porosity_nodes(1:n_nodes), porosity_q_sub)
-                call workspace%fe%lerp(r_sub, workspace%Qi_node(1:n_nodes), Qi_q_sub)
-
-                do k = 1, n_hist
-                    call workspace%fe%lerp(r_sub, T_hist_node(k, 1:n_nodes), T_hist_sub(k))
-                    call workspace%fe%lerp(r_sub, P_hist_node(k, 1:n_nodes), P_hist_sub(k))
-                    call workspace%fe%lerp(r_sub, Qi_hist_node(k, 1:n_nodes), Qi_hist_sub(k))
-                end do
-
-                call state_sub%copy(workspace%state(1))
-                call state_sub%temperature%set(T_q_sub)
-                call state_sub%pressure%set(P_q_sub)
-                call state_sub%porosity%set(porosity_q_sub)
-                call state_sub%ice_content%set(Qi_q_sub)
-                call state_sub%temperature_history%set(T_hist_sub(1:n_hist))
-                call state_sub%pressure_history%set(P_hist_sub(1:n_hist))
-                call state_sub%ice_content_history%set(Qi_hist_sub(1:n_hist))
-                call self%update_water_phases(workspace%material_id, state_sub)
-
-                psi_sub(:) = 0.0d0
-                dpsi_dx_sub(:, :) = 0.0d0
-                call workspace%fe%calc_shape_function(r_sub, workspace%coordinates, psi=psi_sub, &
-                                                      dpsi_dx=dpsi_dx_sub, determinant_jacobian=det_J_sub)
-
-                eff_weight_sub = weight_sub * abs(det_J_sub)
-
-                D_HH_sub = D_HH_elem
-                D_HT_sub = D_HT_elem
-                D_HH_gas_sub = D_HH_gas_elem
-                V_sub(:) = V_elem_mag * V_dir(:)
-
-                ! Storage term (Step 3): C_eq = dTheta/dp at the subcell point,
-                ! same pseudo-transient regularization as the Gauss-rule path,
-                ! plus its residual counterpart d(Theta)/dt.
-                call self%compute_iteration_capacity(workspace%material_id, state_sub, C_eq_sub)
-                C_eq_sub = C_eq_sub + capacity_regularization
-                C_HT_storage_sub = 0.0d0
-                if (coupling_mass_needed) then
-                    call self%compute_coupling_mass_term(workspace%material_id, state_sub, C_HT_storage_sub)
-                end if
-                call self%compute_transient_term_mixed(workspace%material_id, state_sub, &
-                                                       workspace%bdf_coeffs, d_dt_sub)
-
-                do j = 1, n_nodes
-                    do i = 1, n_nodes
-                        mat_HH_sub(i, j) = mat_HH_sub(i, j) + eff_weight_sub * D_HH_sub * &
-                                           dot_product(dpsi_dx_sub(:, i), dpsi_dx_sub(:, j))
-                        mat_HH_gas_sub(i, j) = mat_HH_gas_sub(i, j) + eff_weight_sub * D_HH_gas_sub * &
-                                               dot_product(dpsi_dx_sub(:, i), dpsi_dx_sub(:, j))
-                        mat_HT_sub(i, j) = mat_HT_sub(i, j) + eff_weight_sub * D_HT_sub * &
-                                           dot_product(dpsi_dx_sub(:, i), dpsi_dx_sub(:, j))
-                        mat_C_sub(i, j) = mat_C_sub(i, j) + eff_weight_sub * C_eq_sub * psi_sub(i) * psi_sub(j)
-                        mat_C_HT_sub(i, j) = mat_C_HT_sub(i, j) + &
-                                             eff_weight_sub * C_HT_storage_sub * psi_sub(i) * psi_sub(j)
-                    end do
-                end do
-                do i = 1, n_nodes
-                    vec_V_sub(i) = vec_V_sub(i) + eff_weight_sub * &
-                                   dot_product(dpsi_dx_sub(:, i), V_sub)
-                    vec_ddt_sub(i) = vec_ddt_sub(i) + eff_weight_sub * d_dt_sub * psi_sub(i)
-                end do
-            end do
-
-            if (present(K_HH)) then
-                do j = 1, n_nodes
-                    do i = 1, n_nodes
-                        call K_HH%set(MATRIX_OPS%ADD, i, j, &
-                                      mat_HH_sub(i, j) * dPgen_dP_node(j) + mat_HH_gas_sub(i, j) + &
-                                      bdf0 * mat_C_sub(i, j))
-                    end do
-                end do
-            end if
-            if (present(K_HT) .and. thermal_target) then
-                do j = 1, n_nodes
-                    do i = 1, n_nodes
-                        call K_HT%set(MATRIX_OPS%ADD, i, j, &
-                                      mat_HT_sub(i, j) + mat_HH_sub(i, j) * dPgen_dT_node(j) + &
-                                      bdf0 * mat_C_HT_sub(i, j))
+                        call K_HT%set(MATRIX_OPS%ADD, i, j, work_matrix_coupling(i, j))
                     end do
                 end do
             end if
             if (present(F_H)) then
                 workspace%work_vec(:) = 0.0d0
-                call matvec(mat_HH_sub, P_gen_node, workspace%work_vec, ierr)
+                call matvec(work_matrix_coupling, workspace%T_node, workspace%work_vec, ierr)
+                local_vec_res(:) = local_vec_res(:) + workspace%work_vec(:)
+            end if
+        end if
+
+        call workspace%compute_K2(workspace%work_D, workspace%work_matrix)
+        ! Column j of K2(D_HH) scaled by dP_gen/dp_w.
+        if (present(K_HH)) then
+            do j = 1, n_nodes
                 do i = 1, n_nodes
-                    local_vec_res(i) = local_vec_res(i) + workspace%work_vec(i)
+                    call K_HH%set(MATRIX_OPS%ADD, i, j, workspace%work_matrix(i, j) * dPgen_dP_node(j))
+                end do
+            end do
+        end if
+        ! K_HT also takes K2(D_HH) scaled by dP_gen/dT, independent of the
+        ! thermo-osmotic K2(D_HT) added above.
+        if (coupling_block_needed) then
+            do j = 1, n_nodes
+                do i = 1, n_nodes
+                    call K_HT%set(MATRIX_OPS%ADD, i, j, workspace%work_matrix(i, j) * dPgen_dT_node(j))
+                end do
+            end do
+        end if
+        if (present(F_H)) then
+            do i = 1, n_nodes
+                do j = 1, n_nodes
+                    local_vec_res(i) = local_vec_res(i) + workspace%work_matrix(i, j) * P_gen_node(j)
+                end do
+            end do
+        end if
+
+        ! Vapour flux is driven by the gas pressure, so its column scale is
+        ! unity and it contributes nothing to K_HT.
+        if (gas_flux_needed) then
+            work_D_gas(:, :, :) = 0.0d0
+            do i = 1, n_gauss
+                do d = 1, n_dim
+                    work_D_gas(d, d, i) = D_HH_gas_elem
+                end do
+            end do
+            call workspace%compute_K2(work_D_gas, work_matrix_gas)
+            if (present(K_HH)) then
+                do j = 1, n_nodes
+                    do i = 1, n_nodes
+                        call K_HH%set(MATRIX_OPS%ADD, i, j, work_matrix_gas(i, j))
+                    end do
                 end do
             end if
-
-            if (present(F_H) .and. gas_flux_needed) then
+            if (present(F_H)) then
                 workspace%work_vec(:) = 0.0d0
-                call matvec(mat_HH_gas_sub, workspace%P_node, workspace%work_vec, ierr)
-                do i = 1, n_nodes
-                    local_vec_res(i) = local_vec_res(i) + workspace%work_vec(i)
-                end do
-            end if
-
-            if (present(F_H) .and. thermal_target) then
-                workspace%work_vec(:) = 0.0d0
-                call matvec(mat_HT_sub, workspace%T_node, workspace%work_vec, ierr)
-                do i = 1, n_nodes
-                    local_vec_res(i) = local_vec_res(i) + workspace%work_vec(i)
-                end do
+                call matvec(work_matrix_gas, workspace%P_node, workspace%work_vec, ierr)
+                local_vec_res(:) = local_vec_res(:) + workspace%work_vec(:)
             end if
         end if
 
@@ -632,21 +418,13 @@ contains
         ! 5. Residual Assembly
         ! ----------------------------------------------------------------
         if (present(F_H)) then
-            if (is_cut) then
-                local_vec_res(:) = local_vec_res(:) + vec_ddt_sub(:)
-            else
-                workspace%work_vec(:) = 0.0d0
-                call workspace%compute_R1(workspace%work_d_dt, workspace%work_vec)
-                local_vec_res(:) = local_vec_res(:) + workspace%work_vec(:)
-            end if
+            workspace%work_vec(:) = 0.0d0
+            call workspace%compute_R1(workspace%work_d_dt, workspace%work_vec)
+            local_vec_res(:) = local_vec_res(:) + workspace%work_vec(:)
 
-            if (is_cut) then
-                local_vec_res(:) = local_vec_res(:) - vec_V_sub(:)
-            else
-                workspace%work_vec(:) = 0.0d0
-                call workspace%compute_R2(workspace%work_V, workspace%work_vec)
-                local_vec_res(:) = local_vec_res(:) - workspace%work_vec(:)
-            end if
+            workspace%work_vec(:) = 0.0d0
+            call workspace%compute_R2(workspace%work_V, workspace%work_vec)
+            local_vec_res(:) = local_vec_res(:) - workspace%work_vec(:)
 
             workspace%work_vec(:) = 0.0d0
             call workspace%compute_R1(work_sink, workspace%work_vec)
@@ -752,21 +530,5 @@ contains
         mean_value = exp(sum(log(abs(values))) / real(size(values), real64))
         if (all_negative) mean_value = -mean_value
     end function signed_geometric_mean
-
-    !> TEMPORARY Step-0 verification diagnostic; see interface doc comment.
-    module subroutine report_subcell_debug_counts_hydraulic(self)
-        implicit none
-        class(type_hydraulic), intent(in) :: self
-
-        if (.not. DEBUG_SUBCELL_COUNTER) return
-        write (*, '(A,I0,A,I0,A,ES12.4,A,ES12.4,A,ES12.4,A)') '   [SUBCELL-DEBUG] elements cut = ', dbg_elements_cut, &
-            ' / considered = ', dbg_elements_considered, ' | phi_min=', dbg_phi_min, ' phi_max=', dbg_phi_max, &
-            ' min|phi|=', dbg_abs_phi_min, ' (this assembly)'
-        dbg_elements_considered = 0
-        dbg_elements_cut = 0
-        dbg_phi_min = huge(1.0d0)
-        dbg_phi_max = -huge(1.0d0)
-        dbg_abs_phi_min = huge(1.0d0)
-    end subroutine report_subcell_debug_counts_hydraulic
 
 end submodule hydraulic_matrix

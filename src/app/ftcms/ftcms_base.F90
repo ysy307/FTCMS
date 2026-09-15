@@ -200,8 +200,6 @@ contains
         call self%gradient_cache%initialize(self%domain)
 
         call self%domain%get_num_fe(num_elements)
-        allocate (self%subcell_active_depth(num_elements), source=0_int32)
-        allocate (self%subcell_depth_unresolved(num_elements), source=.false.)
 
         call self%domain%get_start_dof_index(PHYSICS_TYPES%THERMAL, self%thermal_start_dof)
         call self%domain%get_start_dof_index(PHYSICS_TYPES%HYDRAULIC, self%hydraulic_start_dof)
@@ -2591,9 +2589,6 @@ contains
             close (self%solver_history_unit)
             self%solver_history_unit = -1
         end if
-
-        if (allocated(self%subcell_active_depth)) deallocate (self%subcell_active_depth)
-        if (allocated(self%subcell_depth_unresolved)) deallocate (self%subcell_depth_unresolved)
 
     end subroutine destroy_type_ftcms
     !> Give the solver the dof numbering the DM produced, so it can place this

@@ -1389,8 +1389,7 @@ contains
     !> with the compact-support smooth max (compute_effective_suction's
     !> smooth_ramp) that holds exactly iff \(s_f>s_m-\varepsilon_s\), i.e.
     !> \(\phi>0\); \(\phi=0\) is exactly ice onset and \(\phi\le0\) is exactly
-    !> ice-free. This is the level set the freezing-interface subcell
-    !> quadrature (fe_subcell_quadrature.F90, driven from
+    !> ice-free. This is the freezing-interface level set
     !> hydraulic_matrix.F90) should cut elements on, in place of a separately
     !> defined critical temperature: computing it here, from the SAME s_m,s_f
     !> calc_phase_split forms, is what keeps the "cut" elements from drifting

@@ -412,7 +412,7 @@ contains
         ! than from history(1): the finite-difference tangent perturbs
         ! state%temperature/%pressure without touching the history arrays, so
         ! taking it from history(1) drops the current storage term from K_HH/K_HT.
-        call total_storage_hydraulic(self, material_id, state, Theta_j)
+        call self%compute_total_storage(material_id, state, Theta_j)
         dTheta_dt = dTheta_dt + bdf_coeffs(1) * Theta_j
 
         ! j >= 2 are previous-step states: recompute phases at the historical T/P.
@@ -426,7 +426,7 @@ contains
                 call local_state%ice_content%set(ice_content_history(j))
 
                 call self%update_water_phases(material_id, local_state)
-                call total_storage_hydraulic(self, material_id, local_state, Theta_j)
+                call self%compute_total_storage(material_id, local_state, Theta_j)
 
                 dTheta_dt = dTheta_dt + bdf_coeffs(j) * Theta_j
             end do
@@ -434,11 +434,7 @@ contains
 
     end subroutine compute_transient_term_mixed_hydraulic
 
-    !> Total stored water per unit volume at one state,
-    !> \[ \Theta = \theta_w + \frac{\rho_i}{\rho_w}\theta_i + \theta_v + S_c \]
-    !> where \( S_c \) is the compressive storage. Shared by every BDF level of
-    !> compute_transient_term_mixed_hydraulic so all levels use one definition.
-    subroutine total_storage_hydraulic(self, material_id, state, Theta)
+    module subroutine compute_total_storage_hydraulic(self, material_id, state, Theta)
         implicit none
         class(type_hydraulic), intent(in) :: self
         integer(int32), intent(in) :: material_id
@@ -460,7 +456,7 @@ contains
         Theta = Qw + (rho_i / rho_w) * Qi + Qv
         call self%compute_compressive_storage(material_id, state, compressive_storage)
         Theta = Theta + compressive_storage
-    end subroutine total_storage_hydraulic
+    end subroutine compute_total_storage_hydraulic
 
     module subroutine compute_compressive_storage_hydraulic(self, material_id, state, storage, capacity)
         implicit none

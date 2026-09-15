@@ -141,12 +141,6 @@ contains
                     raw(i) = 0.0d0
                 end if
             end do
-            if (name == "temperature") then
-                write (*, '(A,3(A,2ES11.3))') '   [OUTDBG]', &
-                    '  cells(1:3752)=', minval(values(1:3752)), maxval(values(1:3752)), &
-                    '  verts(3753:7645)=', minval(values(3753:7645)), maxval(values(3753:7645)), &
-                    '  edges(7646:)=', minval(values(7646:)), maxval(values(7646:))
-            end if
             call VecRestoreArray(local, raw, ierr)
         end if
 

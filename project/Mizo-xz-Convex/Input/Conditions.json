@@ -128,7 +128,7 @@
         },
         "hydraulic": {
             "type": "uniform",
-            "value": -54065.7412,
+            "value": -44683.6901,
             "field_name": "Pressure"
         },
         "porosity": {

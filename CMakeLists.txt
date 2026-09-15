@@ -36,6 +36,8 @@ add_subdirectory(src/domain)
 add_subdirectory(src/io)
 add_subdirectory(src/physics)
 add_subdirectory(src/app/ftcms)
+add_subdirectory(src/app/plexfem)
+add_subdirectory(src/app/mixed_hydraulic)
 # ====================================================================
 # 4. Executable
 # ====================================================================
@@ -46,6 +48,12 @@ set_target_properties(FTCMS PROPERTIES LINKER_LANGUAGE Fortran)
 # 実行ファイルに必要な最上位ライブラリターゲットをリンクする（名称は仮）
 # 必要なフラグ（インクルードパスやOpenMP等）もターゲット経由で自動伝搬する
 target_link_libraries(FTCMS PRIVATE SOLVER::FTCMS)
+
+# The PetscDS/TS path is a separate executable so that the existing one is not
+# rebuilt against it: the two share the input layer and the mesh, nothing else.
+add_executable(FTCMS_PLEXFEM app/ftcms_plexfem.f90)
+set_target_properties(FTCMS_PLEXFEM PROPERTIES LINKER_LANGUAGE Fortran)
+target_link_libraries(FTCMS_PLEXFEM PRIVATE SOLVER::PLEXFEM)
 
 include(GNUInstallDirs)
 

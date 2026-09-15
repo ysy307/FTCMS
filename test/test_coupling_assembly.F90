@@ -15,8 +15,6 @@ program test_coupling_assembly
     real(real64) :: thermal_sum_before, thermal_sum_after
     real(real64) :: block_error(5)
     integer(int32) :: ierr, i, num_nodes, n_dim
-    integer(int32) :: depth_histogram(0:5), active_depth_before_size
-    integer(int32), allocatable :: active_depth_before(:)
     real(real64), allocatable :: node_coord(:)
     real(real64) :: z_min, z_max
     !> The finite-difference coupling block is a difference quotient, so it
@@ -74,36 +72,8 @@ program test_coupling_assembly
 
     call ftcms%assemble()
 
-    if (.not. allocated(ftcms%subcell_active_depth)) then
-        write (error_unit, '(A)') "FAIL: adaptive subcell depth state is not allocated"
-        error stop 1
-    end if
-    if (any(ftcms%subcell_active_depth < 0) .or. any(ftcms%subcell_active_depth > 5)) then
-        write (error_unit, '(A)') "FAIL: adaptive subcell depth is outside [0,5]"
-        error stop 1
-    end if
-    if (count(ftcms%subcell_active_depth > 0) == 0) then
-        write (error_unit, '(A)') "FAIL: freezing-front ramp triggered no subcell refinement"
-        error stop 1
-    end if
-    depth_histogram = 0
-    do i = 0, 5
-        depth_histogram(i) = count(ftcms%subcell_active_depth == i)
-    end do
-    write (output_unit, '(A,6(1X,I0),A,I0)') "PASS: adaptive subcell depth histogram 0:5 =", &
-        depth_histogram, "; unresolved=", count(ftcms%subcell_depth_unresolved)
-
-    active_depth_before_size = size(ftcms%subcell_active_depth)
-    allocate (active_depth_before(active_depth_before_size))
-    active_depth_before = ftcms%subcell_active_depth
     call ftcms%assemble(residual_only=.true.)
-    if (any(ftcms%subcell_active_depth /= active_depth_before)) then
-        write (error_unit, '(A)') "FAIL: residual-only assembly changed the selected subcell depth"
-        error stop 1
-    end if
-    write (output_unit, '(A)') "PASS: residual-only assembly reused the selected subcell depth"
-    deallocate (active_depth_before)
-
+    
     call ftcms%K%assemble()
     matrix = ftcms%K%get_matrix()
     if (matrix%v == PETSC_NULL_MAT%v) then

@@ -2,8 +2,6 @@ submodule(app_ftcms) ftcms_assemble
     use, intrinsic :: ieee_arithmetic, only:ieee_is_finite
     implicit none
 
-    real(real64), parameter :: SUBCELL_ADAPTIVE_RELATIVE_TOLERANCE = 1.0d-3
-
     !> One element's local blocks, indexed by physics id on both axes so the
     !> helpers below do not enumerate the physics pairs by name.
     type :: type_assemble_blocks
@@ -87,10 +85,6 @@ contains
         !> analytic blocks in this assembly sweep, summed across colors and
         !> threads; reported once after the parallel region, only if nonzero.
         integer(int32) :: fd_tangent_fallback_count
-        integer(int32) :: selected_subcell_depth
-        logical :: subcell_depth_unresolved
-        integer(int32) :: local_unresolved_count, global_unresolved_count
-        integer(int32) :: local_max_depth, global_max_depth, mpi_rank, ierr
 
         call self%control%profiler_start(PROFILER_TYPES%ASSEMBLE)
 
@@ -128,9 +122,6 @@ contains
 
         use_scatter = .true.
         fd_tangent_fallback_count = 0
-        if (assemble_matrix .and. allocated(self%subcell_depth_unresolved)) then
-            self%subcell_depth_unresolved = .false.
-        end if
 
         !$OMP PARALLEL IF(do_hydraulic .or. do_thermal) DEFAULT(NONE) &
         !$OMP SHARED(self, num_colors, elements_list, num_elements_in_color, &
@@ -140,8 +131,7 @@ contains
         !$OMP         row_physics, col_physics, &
         !$OMP         local_blocks, fine_blocks, active_elem, &
         !$OMP         elem_coords, raw_elem_coords, num_nodes_local, &
-        !$OMP         do_thermal_elem, do_hydraulic_elem, fd_tangent_ok, &
-        !$OMP         selected_subcell_depth, subcell_depth_unresolved)
+        !$OMP         do_thermal_elem, do_hydraulic_elem, fd_tangent_ok)
 
         do i_color = 1, num_colors
 
@@ -183,18 +173,11 @@ contains
                     ! element once per candidate depth, which is the bulk of the
                     ! assembly cost, and a fixed depth also makes the residual a
                     ! function of the state alone.
-                    selected_subcell_depth = 0
-                    subcell_depth_unresolved = .false.
-                    call workspace%set_subcell_depth(selected_subcell_depth)
                     if (assemble_matrix) then
                         call assemble_local_blocks(self, workspace, local_blocks)
                     else
                         call self%assemble_local(workspace, local_F_T=local_blocks%F(ID_THERMAL), &
                                                  local_F_H=local_blocks%F(ID_HYDRAULIC))
-                    end if
-                    if (allocated(self%subcell_active_depth)) then
-                        self%subcell_active_depth(elem_id) = selected_subcell_depth
-                        self%subcell_depth_unresolved(elem_id) = subcell_depth_unresolved
                     end if
 
                     ! An element where only one physics is active has no
@@ -275,30 +258,6 @@ contains
 
         !$OMP END PARALLEL
 
-        ! TEMPORARY Step-0 verification diagnostic (see hydraulic_matrix.F90,
-        ! report_subcell_debug_counts_hydraulic); no-op unless that submodule's
-        ! DEBUG_SUBCELL_COUNTER parameter is set to .true.
-        call self%hydraulic%report_subcell_debug_counts()
-
-        if (assemble_matrix .and. allocated(self%subcell_depth_unresolved)) then
-            local_unresolved_count = count(self%subcell_depth_unresolved)
-            local_max_depth = 0
-            if (size(self%subcell_active_depth) > 0) then
-                local_max_depth = maxval(self%subcell_active_depth)
-            end if
-            call MPI_Allreduce(local_unresolved_count, global_unresolved_count, 1, MPI_INTEGER4, &
-                               MPI_SUM, MPI_COMM_WORLD, ierr)
-            call MPI_Allreduce(local_max_depth, global_max_depth, 1, MPI_INTEGER4, &
-                               MPI_MAX, MPI_COMM_WORLD, ierr)
-            call MPI_Comm_rank(MPI_COMM_WORLD, mpi_rank, ierr)
-            if (mpi_rank == 0 .and. global_unresolved_count > 0) then
-                write (*, '(A,I0,A,I0,A,ES9.2,A)') &
-                    '   [SUBCELL-ADAPTIVE] ', global_unresolved_count, &
-                    ' element(s) unresolved at depth ', global_max_depth, &
-                    ' (relative tolerance ', SUBCELL_ADAPTIVE_RELATIVE_TOLERANCE, ')'
-            end if
-        end if
-
         if (fd_tangent_fallback_count > 0) then
             write (*, '(A,I0,A)') '   [FULL-FD-TANGENT] fell back to the analytic block on ', &
                 fd_tangent_fallback_count, ' element(s) (non-finite finite-difference column)'
@@ -307,45 +266,6 @@ contains
         call self%control%profiler_stop(PROFILER_TYPES%ASSEMBLE)
 
     end subroutine assemble_ftcms
-
-    subroutine select_subcell_depth(self, workspace, active, blocks, fine, &
-                                    selected_depth, unresolved)
-        implicit none
-        class(type_ftcms), intent(inout) :: self
-        type(type_assemble_workspace), intent(inout) :: workspace
-        !> Active physics ids of this element
-        logical, intent(in) :: active(:)
-        type(type_assemble_blocks), intent(inout) :: blocks, fine
-        integer(int32), intent(inout) :: selected_depth
-        logical, intent(inout) :: unresolved
-
-        integer(int32) :: fine_depth, max_depth
-
-        selected_depth = 0
-        unresolved = .false.
-        call workspace%subcell_quadrature%get_max_depth(max_depth)
-        call workspace%set_subcell_depth(selected_depth)
-        call assemble_local_blocks(self, workspace, blocks)
-
-        if (.not. workspace%is_cut .or. .not. workspace%is_sign_mixed .or. max_depth == 0) return
-
-        do fine_depth = 1, max_depth
-            call initialize_local_system(workspace%num_fe_nodes, active, fine)
-            call workspace%set_subcell_depth(fine_depth)
-            call assemble_local_blocks(self, workspace, fine)
-
-            if (local_systems_agree(active, blocks, fine)) then
-                call workspace%set_subcell_depth(selected_depth)
-                return
-            end if
-
-            selected_depth = fine_depth
-            call copy_local_system(active, fine, blocks)
-        end do
-
-        unresolved = .true.
-        call workspace%set_subcell_depth(selected_depth)
-    end subroutine select_subcell_depth
 
     !> Unpack the indexed blocks into the named arguments assemble_local still
     !> takes. Removing this shim is the next slice of the DOF generalization.
@@ -365,99 +285,6 @@ contains
                                  blocks%K(ID_HYDRAULIC, ID_THERMAL), &
                                  blocks%F(ID_THERMAL), blocks%F(ID_HYDRAULIC))
     end subroutine assemble_local_blocks
-
-    subroutine initialize_local_system(num_nodes, active, blocks)
-        implicit none
-        integer(int32), intent(in) :: num_nodes
-        !> Active physics ids of this element
-        logical, intent(in) :: active(:)
-        type(type_assemble_blocks), intent(inout) :: blocks
-
-        integer(int32) :: r, c
-
-        do r = 1, PHYSICS_TYPES%NUM_ID
-            if (.not. active(r)) cycle
-            call check_initialize_vector(blocks%F(r), num_nodes)
-            do c = 1, PHYSICS_TYPES%NUM_ID
-                if (.not. active(c)) cycle
-                call check_initialize_matrix(blocks%K(r, c), num_nodes)
-            end do
-        end do
-    end subroutine initialize_local_system
-
-    logical function local_systems_agree(active, coarse, fine) result(agree)
-        implicit none
-        logical, intent(in) :: active(:)
-        type(type_assemble_blocks), intent(in) :: coarse, fine
-
-        integer(int32) :: r, c
-
-        agree = .true.
-        do r = 1, PHYSICS_TYPES%NUM_ID
-            if (.not. active(r)) cycle
-            agree = agree .and. vectors_agree(coarse%F(r), fine%F(r))
-            do c = 1, PHYSICS_TYPES%NUM_ID
-                if (.not. active(c)) cycle
-                agree = agree .and. matrices_agree(coarse%K(r, c), fine%K(r, c))
-            end do
-        end do
-    end function local_systems_agree
-
-    logical function matrices_agree(coarse, fine) result(agree)
-        implicit none
-        type(type_matrix_dense), intent(in), target :: coarse, fine
-
-        real(real64), pointer, contiguous :: coarse_values(:, :), fine_values(:, :)
-
-        coarse_values => coarse%get_val()
-        fine_values => fine%get_val()
-        agree = arrays_agree(reshape(coarse_values, [size(coarse_values)]), &
-                             reshape(fine_values, [size(fine_values)]))
-    end function matrices_agree
-
-    logical function vectors_agree(coarse, fine) result(agree)
-        implicit none
-        type(type_vector_dp), intent(in), target :: coarse, fine
-
-        real(real64), pointer, contiguous :: coarse_values(:), fine_values(:)
-
-        coarse_values => coarse%get_data()
-        fine_values => fine%get_data()
-        agree = arrays_agree(coarse_values, fine_values)
-    end function vectors_agree
-
-    logical function arrays_agree(coarse, fine) result(agree)
-        implicit none
-        real(real64), intent(in) :: coarse(:), fine(:)
-
-        real(real64) :: difference_norm, value_norm
-
-        agree = .false.
-        if (size(coarse) /= size(fine)) return
-        if (.not. all(ieee_is_finite(coarse)) .or. .not. all(ieee_is_finite(fine))) return
-
-        difference_norm = maxval(abs(fine - coarse))
-        value_norm = max(maxval(abs(coarse)), maxval(abs(fine)))
-        agree = difference_norm <= SUBCELL_ADAPTIVE_RELATIVE_TOLERANCE * value_norm
-    end function arrays_agree
-
-    subroutine copy_local_system(active, source, target)
-        implicit none
-        logical, intent(in) :: active(:)
-        type(type_assemble_blocks), intent(in) :: source
-        type(type_assemble_blocks), intent(inout) :: target
-
-        integer(int32) :: r, c
-
-        do r = 1, PHYSICS_TYPES%NUM_ID
-            if (.not. active(r)) cycle
-            call copy_vector(source%F(r), target%F(r))
-            do c = 1, PHYSICS_TYPES%NUM_ID
-                if (.not. active(c)) cycle
-                call copy_matrix(source%K(r, c), target%K(r, c))
-            end do
-        end do
-    end subroutine copy_local_system
 
     subroutine copy_matrix(source, target)
         implicit none

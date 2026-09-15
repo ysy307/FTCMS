@@ -21,10 +21,6 @@ target_link_libraries(petsc_smoke PRIVATE
 
 add_test(NAME petsc_smoke_serial COMMAND $<TARGET_FILE:petsc_smoke>)
 
-add_executable(petscfe_probe petscfe_probe.F90)
-target_link_libraries(petscfe_probe PRIVATE SOLVER::CORE PkgConfig::PETSC MPI::MPI_Fortran)
-set_target_properties(petscfe_probe PROPERTIES LINKER_LANGUAGE Fortran)
-
 add_executable(vtu_probe vtu_probe.F90)
 target_link_libraries(vtu_probe PRIVATE PkgConfig::PETSC MPI::MPI_Fortran)
 
@@ -34,16 +30,6 @@ set_target_properties(dmplex_probe PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
 )
 target_link_libraries(dmplex_probe PRIVATE PkgConfig::PETSC MPI::MPI_Fortran)
-
-add_executable(freezing_plex test_freezing_plex.F90)
-set_target_properties(freezing_plex PROPERTIES
-    LINKER_LANGUAGE Fortran
-    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
-)
-target_link_libraries(freezing_plex PRIVATE
-    PkgConfig::PETSC
-    MPI::MPI_Fortran
-)
 
 if(ENABLE_MPI AND MPI_Fortran_FOUND)
     add_test(NAME petsc_smoke_mpi_2
@@ -146,14 +132,6 @@ add_solver_test(field
         SOLVER::CORE
         SOLVER::LINALG
         SOLVER::SYSTEM
-)
-
-# test_fe_subcell: freezing-fringe subcell quadrature and chemical potential utilities
-add_solver_test(fe_subcell
-    LIBS
-        SOLVER::CORE
-        SOLVER::CONSTITUTIVE
-        SOLVER::DOMAIN
 )
 
 add_solver_test(constitutive

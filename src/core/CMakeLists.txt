@@ -156,8 +156,13 @@ target_sources(SOLVER_CORE PRIVATE
 target_sources(SOLVER_CORE PRIVATE
 
     # --- Utils ---
-    interop/petscfe/petscfe_wrapper.F90
     interop/interop_utils.F90
+
+    # --- PETSc ---
+    interop/petscfe/petscfe_shim.c
+    interop/petscfe/petscfe_wrapper.F90
+    interop/petscds/petscds_shim.c
+    interop/petscds/petscds_wrapper.F90
 
     # --- Memory Profiling ---
     interop/memory_profiling/memory_stats.c
@@ -175,7 +180,6 @@ target_sources(SOLVER_CORE PRIVATE
     interop/system_info/system_info_wrapper.F90
 
     # --- VTK (C++) ---
-    interop/petscfe/petscfe_shim.c
     interop/vtk/writer_vtk.cpp
     interop/vtk/writer_vtu.cpp
     interop/vtk/c_wrapper.cpp

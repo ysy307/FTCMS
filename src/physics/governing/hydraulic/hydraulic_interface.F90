@@ -48,7 +48,6 @@ module physics_governing_hydraulic
         integer(int32) :: computation_type
         integer(int32) :: computation_dimension
         logical :: enable_vapor_transport = .true.
-        logical :: enable_fringe_subcell_quadrature = .true.
         !> Diagnostic-only switch: skip the pseudo-transient capacity
         !> regularization (see hydraulic_matrix.F90) when assembling K_HH.
         !> Set by the FD-Jacobian audit (report_fd_jacobian_ftcms) so its
@@ -70,10 +69,10 @@ module physics_governing_hydraulic
         ! --- Coefficient Computation Procedures ---
         procedure, pass(self), public :: compute_diffusion_term => compute_diffusion_term_hydraulic
         procedure, pass(self), public :: compute_diffusion_term_gas => compute_diffusion_term_gas_hydraulic
-        procedure, pass(self), private :: compute_advective_term => compute_advective_term_hydraulic
+        procedure, pass(self), public :: compute_advective_term => compute_advective_term_hydraulic
 
         ! --- Coupling Coefficient Procedures ---
-        procedure, pass(self), private :: compute_coupling_mass_term => compute_coupling_mass_term_hydraulic
+        procedure, pass(self), public :: compute_coupling_mass_term => compute_coupling_mass_term_hydraulic
         procedure, pass(self), public :: compute_coupling_diffusion_term => compute_coupling_diffusion_term_hydraulic
 
         ! --- Helper Procedures ---
@@ -93,14 +92,13 @@ module physics_governing_hydraulic
         procedure, pass(self), public :: calc_effective_density_value => calc_effective_density_value_hydraulic
 
         procedure, pass(self), public :: compute_C_eq => compute_C_eq_hydraulic
+        procedure, pass(self), public :: compute_total_storage => compute_total_storage_hydraulic
         procedure, pass(self), private :: compute_iteration_capacity => compute_iteration_capacity_hydraulic
         procedure, pass(self), private :: compute_transient_term_mixed => compute_transient_term_mixed_hydraulic
         procedure, pass(self), private :: compute_compressive_storage => compute_compressive_storage_hydraulic
         procedure, pass(self), public :: calc_segregation_sink => calc_segregation_sink_hydraulic
         ! ---- Meta / Utility ----
         !> TEMPORARY Step-0 verification diagnostic (see hydraulic_matrix.F90);
-        !> to be removed once the subcell-quadrature firing rate is confirmed.
-        procedure, pass(self), public :: report_subcell_debug_counts => report_subcell_debug_counts_hydraulic
     end type type_hydraulic
 
     interface
@@ -309,6 +307,23 @@ module physics_governing_hydraulic
             real(real64), intent(inout) :: capacity
         end subroutine compute_iteration_capacity_hydraulic
 
+        !> Total stored water per unit volume at one state,
+        !> \[ \Theta = \theta_w + \frac{\rho_i}{\rho_w}\theta_i + \theta_v + S_c \]
+        !> where \( S_c \) is the compressive storage. This is the quantity
+        !> compute_C_eq is the pressure derivative of, so every level that
+        !> differences stored water must difference this one and not a
+        !> reassembled sum of phases: dropping \( S_c \) here while keeping its
+        !> capacity in compute_C_eq leaves a matrix diagonal that no residual
+        !> term corresponds to, which is exactly where the medium saturates and
+        !> \( d\theta_{SWRC}/dp \) vanishes.
+        module subroutine compute_total_storage_hydraulic(self, material_id, state, Theta)
+            implicit none
+            class(type_hydraulic), intent(in) :: self
+            integer(int32), intent(in) :: material_id
+            type(type_state), intent(in) :: state
+            real(real64), intent(inout) :: Theta
+        end subroutine compute_total_storage_hydraulic
+
         !> Compute BDF approximation of dTheta/dt for Mixed formulation.
         !> \[ \frac{d\Theta}{dt} \approx \sum_j \alpha_j \Theta(t_{n+1-j}) \]
         !> where \(\Theta = \theta_l + (\rho_i/\rho_l)\theta_i + \theta_v\).
@@ -338,17 +353,6 @@ module physics_governing_hydraulic
             real(real64), intent(in) :: dt
             real(real64), intent(inout) :: S_seg
         end subroutine calc_segregation_sink_hydraulic
-
-        !> TEMPORARY Step-0 verification diagnostic. Prints and resets the
-        !> module-scope "elements considered / elements cut" counters
-        !> accumulated by assemble_local_picard_hydraulic (hydraulic_matrix.F90)
-        !> since the last call. No-op unless DEBUG_SUBCELL_COUNTER is .true.
-        !> there. Remove together with the counters once the subcell-quadrature
-        !> firing rate is confirmed for the case under investigation.
-        module subroutine report_subcell_debug_counts_hydraulic(self)
-            implicit none
-            class(type_hydraulic), intent(in) :: self
-        end subroutine report_subcell_debug_counts_hydraulic
 
     end interface
 

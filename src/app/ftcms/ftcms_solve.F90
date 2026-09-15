@@ -1574,7 +1574,6 @@ contains
                                 hc_aa_T, hc_aa_P, hc_aa_duT, hc_aa_duP, hc_has_prev, hc_gnorm)
                 call self%reflect_variables(step_scale=0.0d0)
                 call self%control%reject_homotopy_stage()
-                ! Re-assemble fully at the banked lambda: the cached subcell
                 ! depth and the matrix blocks still belong to the rejected one.
                 call self%assemble()
                 call self%apply_bc(prescribed=.false.)

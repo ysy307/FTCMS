@@ -9,6 +9,7 @@
 !> numbering FTCMS uses, and the DM point each number refers to.
 module domain_mesh_plex
     use, intrinsic :: iso_fortran_env, only: int32, real64
+    use, intrinsic :: iso_c_binding, only: c_ptr
     use petscdmplex
     use :: core_unique, only:unique
     use :: module_core, only:FE_TYPE
@@ -16,6 +17,7 @@ module domain_mesh_plex
     private
 
     public :: type_mesh_plex
+
     public :: type_dof_layout
 
     !> A degree-of-freedom numbering produced by the DM.
@@ -41,11 +43,22 @@ module domain_mesh_plex
         PetscInt :: coord_end = 0
         integer(int32) :: dimension = 0
 
-        !> Dense node numbering. node_point maps 1..num_nodes to a DM point,
-        !> point_node is its inverse over the coordinate chart.
+        !> Dense node numbering, taken from the coordinate section. A mesh
+        !> point carries one node per coordinate value on it, which is one for a
+        !> vertex but two on the edge of a cubic element and four inside it, so
+        !> the count follows the section's degrees of freedom, never the number
+        !> of points.
         integer(int32) :: num_nodes = 0
-        integer(int32), allocatable :: node_point(:)
-        integer(int32), allocatable :: point_node(:)
+        integer(int32) :: coordinate_dim = 0
+        !> One dof per node. PETSc walks the closure against this and hands back
+        !> the node indices in the order its own basis is numbered, so the
+        !> connectivity and the shape functions agree without either side
+        !> knowing the other's convention.
+        PetscSection :: node_section
+        logical :: node_section_ready = .false.
+        !> First node of each point, and how many it carries.
+        integer(int32), allocatable :: point_first_node(:)
+        integer(int32), allocatable :: point_num_nodes(:)
         integer(int32) :: global_num_nodes = 0
         integer(int32), allocatable :: node_global_id(:)
         logical, allocatable :: node_is_owned(:)
@@ -81,7 +94,8 @@ module domain_mesh_plex
         procedure, public :: create_dof_layout => create_dof_layout_mesh_plex
         procedure, public :: create_matrix => create_matrix_mesh_plex
         procedure, public :: get_output_dm => get_output_dm_mesh_plex
-        procedure, private :: get_element_shape => get_element_shape_mesh_plex
+        procedure, public :: get_element_shape => get_element_shape_mesh_plex
+        procedure, private :: coordinate_order => coordinate_order_mesh_plex
         procedure, public :: get_visualisation_shape => get_visualisation_shape_mesh_plex
         procedure, public :: get_vertex_nodes => get_vertex_nodes_mesh_plex
         procedure, public :: get_cell_connectivity => get_cell_connectivity_mesh_plex
@@ -102,19 +116,55 @@ contains
         character(*), intent(in) :: file_name
 
         PetscErrorCode :: ierr
-        DM :: distributed
+        DM :: distributed, refined
         PetscSection :: section
         PetscMPIInt :: num_procs
-        PetscBool :: ready
-        PetscInt :: raw_dimension
+        PetscBool :: ready, refine_found
+        PetscInt :: raw_dimension, refine_levels, level
 
         ierr = 0
         call PetscInitialized(ready, ierr)
         if (ready .eqv. PETSC_FALSE) call PetscInitialize(ierr)
 
+        ! Read every coordinate the file carries, not just the first ones.
+        !
+        ! A two-dimensional analysis of downward flow is meshed in the x-z
+        ! plane, because gravity has to act along a coordinate the solve
+        ! carries. Left to itself the reader keeps the first two coordinates of
+        ! such a file, which are x and a y that never varies, and every cell
+        ! comes out flat. Read in three, the mesh is the surface it actually
+        ! is, and PETSc measures it with the metric of that surface -- so an
+        ! x-y mesh and an x-z mesh both mean what they say.
+        call PetscOptionsSetValue(PETSC_NULL_OPTIONS, "-dm_plex_gmsh_spacedim", "3", ierr)
+        if (ierr /= 0) error stop "PETSc rejected the mesh reader options"
+
         ! interpolate = TRUE builds the faces the boundary labels hang off.
         call DMPlexCreateFromFile(PETSC_COMM_WORLD, trim(file_name), "mesh", PETSC_TRUE, self%dm, ierr)
         if (ierr /= 0) error stop "DMPlex could not read the mesh"
+
+        ! A mesh whose coordinates PETSc can only hold one set per cell has no
+        ! shared node set to solve on, and is refused rather than bent into one.
+        call reject_unsupported_coordinates(self, file_name)
+
+        ! Uniform refinement of the mesh as read, for mesh-dependence studies
+        ! that must not touch the mesh file: -ftcms_refine <levels> halves every
+        ! cell's length scale that many times. PETSc carries "Cell Sets" and
+        ! "Face Sets" onto the children, and the embedding dimension with them,
+        ! so materials, boundaries and an x-z plane survive. It runs before the
+        ! distribution and before any index is built from the mesh.
+        refine_levels = 0
+        call PetscOptionsGetInt(PETSC_NULL_OPTIONS, PETSC_NULL_CHARACTER, "-ftcms_refine", &
+                                refine_levels, refine_found, ierr)
+        if (ierr /= 0) error stop "PETSc could not read -ftcms_refine"
+        if (refine_levels > 0) then
+            call DMPlexSetRefinementUniform(self%dm, PETSC_TRUE, ierr)
+            do level = 1, refine_levels
+                call DMRefine(self%dm, PETSC_COMM_WORLD, refined, ierr)
+                if (ierr /= 0) error stop "DMPlex could not refine the mesh"
+                call DMDestroy(self%dm, ierr)
+                self%dm = refined
+            end do
+        end if
 
         call MPI_Comm_size(PETSC_COMM_WORLD, num_procs, ierr)
         if (num_procs > 1) then
@@ -138,6 +188,64 @@ contains
 
         self%loaded = .true.
     end subroutine load_mesh_plex
+
+    !> Stop on a mesh whose coordinates PETSc cannot hold continuously.
+    !>
+    !> PETSc reads a high-order simplex mesh with its coordinates held one set
+    !> per cell, because the permutation from its own closure ordering to the
+    !> Gmsh one is not implemented for simplices
+    !> (src/dm/impls/plex/plexgmsh.c: "XXX FIXME Requires
+    !> DMPlexSetClosurePermutationLexicographic()"). Tensor cells have that
+    !> permutation and are read continuously.
+    !>
+    !> Forcing continuity through
+    !> -dm_plex_gmsh_project_petscdualspace_lagrange_continuity overrides the
+    !> guard rather than supplying the permutation: the node count comes out
+    !> right but vertices and edges receive coefficients belonging to other
+    !> cells, so the elements are silently wrong. A mesh that cannot be read
+    !> correctly is refused here instead.
+    subroutine reject_unsupported_coordinates(self, file_name)
+        implicit none
+        class(type_mesh_plex), intent(inout) :: self
+        character(*), intent(in) :: file_name
+
+        PetscErrorCode :: ierr
+        PetscSection :: section
+        PetscInt :: v_start, v_end, c_start, c_end, dof, coord_dim
+        integer(int32) :: nodes_on_cell
+
+        ! Every query is checked: a mesh this routine cannot inspect must not be
+        ! waved through, since being waved through is what lets a broken one run.
+        call DMGetCoordinateSection(self%dm, section, ierr)
+        if (ierr /= 0) error stop "PETSc could not report where the mesh keeps its coordinates"
+        call DMGetCoordinateDim(self%dm, coord_dim, ierr)
+        if (ierr /= 0 .or. coord_dim <= 0) error stop "PETSc could not report the coordinate dimension"
+        call DMPlexGetDepthStratum(self%dm, 0_PETSC_INT_KIND, v_start, v_end, ierr)
+        if (ierr /= 0) error stop "PETSc could not report the mesh vertices"
+        call DMPlexGetHeightStratum(self%dm, 0_PETSC_INT_KIND, c_start, c_end, ierr)
+        if (ierr /= 0) error stop "PETSc could not report the mesh cells"
+        if (c_end <= c_start .or. v_end <= v_start) return
+
+        ! Coordinates on the vertices mean the set is continuous, which is what
+        ! every supported mesh gives.
+        call PetscSectionGetDof(section, v_start, dof, ierr)
+        if (ierr /= 0) error stop "PETSc could not report the coordinates held on a vertex"
+        if (dof > 0) return
+
+        call PetscSectionGetDof(section, c_start, dof, ierr)
+        if (ierr /= 0) error stop "PETSc could not report the coordinates held on a cell"
+        nodes_on_cell = int(dof, int32) / int(coord_dim, int32)
+
+        write (*, '(A)') "This mesh cannot be read with a continuous set of nodes:"
+        write (*, '(A,A)') "   file            : ", trim(file_name)
+        write (*, '(A,I0,A)') "   coordinates are held per cell, ", nodes_on_cell, " to a cell"
+        write (*, '(A)') "   PETSc reads a high-order simplex mesh this way because the"
+        write (*, '(A)') "   ordering it would need for a shared node set is not implemented"
+        write (*, '(A)') "   for simplices in this version; tensor cells are read continuously."
+        write (*, '(A)') "   Use a linear simplex mesh, or a quadrilateral or hexahedral mesh"
+        write (*, '(A)') "   of any order, or a PETSc that carries the simplex ordering."
+        error stop "Unsupported mesh: high-order simplex"
+    end subroutine reject_unsupported_coordinates
 
     subroutine destroy_mesh_plex(self)
         implicit none
@@ -175,30 +283,49 @@ contains
 
         PetscErrorCode :: ierr
         PetscSection :: section
-        PetscInt :: point, dof
-        integer(int32) :: chart_size, node
+        PetscInt :: point, dof, offset, coord_dim
+        integer(int32) :: chart_size, index
 
+        call DMGetCoordinateDim(self%dm, coord_dim, ierr)
+        self%coordinate_dim = int(coord_dim, int32)
         call DMGetCoordinateSection(self%dm, section, ierr)
 
         chart_size = int(self%coord_end - self%coord_start, int32)
-        if (allocated(self%point_node)) deallocate (self%point_node)
-        allocate (self%point_node(max(chart_size, 1)))
-        self%point_node = 0
+        if (allocated(self%point_first_node)) deallocate (self%point_first_node)
+        if (allocated(self%point_num_nodes)) deallocate (self%point_num_nodes)
+        allocate (self%point_first_node(max(chart_size, 1)))
+        allocate (self%point_num_nodes(max(chart_size, 1)))
+        self%point_first_node = 0
+        self%point_num_nodes = 0
 
+        ! The coordinate values are stored one node after another, so a node's
+        ! index is its position in that storage and its coordinates are read
+        ! straight out of it.
         self%num_nodes = 0
         do point = self%coord_start, self%coord_end - 1
             call PetscSectionGetDof(section, point, dof, ierr)
             if (dof <= 0) cycle
-            self%num_nodes = self%num_nodes + 1
-            self%point_node(int(point - self%coord_start, int32) + 1) = self%num_nodes
+            call PetscSectionGetOffset(section, point, offset, ierr)
+            index = int(point - self%coord_start, int32) + 1
+            self%point_first_node(index) = int(offset, int32) / self%coordinate_dim + 1
+            self%point_num_nodes(index) = int(dof, int32) / self%coordinate_dim
+            self%num_nodes = self%num_nodes + self%point_num_nodes(index)
         end do
 
-        if (allocated(self%node_point)) deallocate (self%node_point)
-        allocate (self%node_point(max(self%num_nodes, 1)))
+        if (self%node_section_ready) then
+            call PetscSectionDestroy(self%node_section, ierr)
+            self%node_section_ready = .false.
+        end if
+        call PetscSectionCreate(PETSC_COMM_WORLD, self%node_section, ierr)
+        call PetscSectionSetChart(self%node_section, self%coord_start, self%coord_end, ierr)
         do point = self%coord_start, self%coord_end - 1
-            node = self%point_node(int(point - self%coord_start, int32) + 1)
-            if (node > 0) self%node_point(node) = int(point, int32)
+            index = int(point - self%coord_start, int32) + 1
+            if (self%point_num_nodes(index) <= 0) cycle
+            call PetscSectionSetDof(self%node_section, point, &
+                                    int(self%point_num_nodes(index), PETSC_INT_KIND), ierr)
         end do
+        call PetscSectionSetUp(self%node_section, ierr)
+        self%node_section_ready = .true.
     end subroutine build_node_index
 
     !> Contiguous global node ids. A section with one dof per node, pushed
@@ -213,7 +340,7 @@ contains
         PetscSF :: point_sf
         PetscSection :: local_section, global_section
         PetscInt :: point, offset
-        integer(int32) :: node, num_owned
+        integer(int32) :: node, num_owned, index, local
         integer(int32) :: send_buffer(1), recv_buffer(1)
 
         if (allocated(self%node_global_id)) deallocate (self%node_global_id)
@@ -227,9 +354,11 @@ contains
 
         call PetscSectionCreate(PETSC_COMM_WORLD, local_section, ierr)
         call PetscSectionSetChart(local_section, self%coord_start, self%coord_end, ierr)
-        do node = 1, self%num_nodes
-            call PetscSectionSetDof(local_section, int(self%node_point(node), PETSC_INT_KIND), &
-                                    1_PETSC_INT_KIND, ierr)
+        do index = 1, size(self%point_num_nodes)
+            if (self%point_num_nodes(index) <= 0) cycle
+            call PetscSectionSetDof(local_section, &
+                                    int(index - 1, PETSC_INT_KIND) + self%coord_start, &
+                                    int(self%point_num_nodes(index), PETSC_INT_KIND), ierr)
         end do
         call PetscSectionSetUp(local_section, ierr)
 
@@ -238,18 +367,22 @@ contains
         if (ierr /= 0) error stop "PETSc could not build the global node numbering"
 
         num_owned = 0
-        do node = 1, self%num_nodes
-            point = int(self%node_point(node), PETSC_INT_KIND)
+        do index = 1, size(self%point_num_nodes)
+            if (self%point_num_nodes(index) <= 0) cycle
+            point = int(index - 1, PETSC_INT_KIND) + self%coord_start
             call PetscSectionGetOffset(global_section, point, offset, ierr)
-            if (offset >= 0) then
-                self%node_global_id(node) = int(offset, int32) + 1
-                self%node_is_owned(node) = .true.
-                num_owned = num_owned + 1
-            else
-                ! An unowned point stores -(owner offset + 1).
-                self%node_global_id(node) = int(-offset, int32)
-                self%node_is_owned(node) = .false.
-            end if
+            do local = 1, self%point_num_nodes(index)
+                node = self%point_first_node(index) + local - 1
+                if (offset >= 0) then
+                    self%node_global_id(node) = int(offset, int32) + local
+                    self%node_is_owned(node) = .true.
+                    num_owned = num_owned + 1
+                else
+                    ! An unowned point stores -(owner offset + 1).
+                    self%node_global_id(node) = int(-offset, int32) + local - 1
+                    self%node_is_owned(node) = .false.
+                end if
+            end do
         end do
 
         call PetscSectionDestroy(global_section, ierr)
@@ -358,9 +491,11 @@ contains
         if (allocated(nodes)) deallocate (nodes)
     end subroutine describe_cell
 
-    !> Map the PETSc cell shape and node count onto the element type FTCMS
-    !> knows. The list is a whitelist: a shape that is not on it is rejected
-    !> rather than approximated by a neighbouring one.
+    !> Map the PETSc cell shape and coordinate degree onto the element type
+    !> FTCMS knows. Both come from PETSc: the shape from DMPlexGetCellType and
+    !> the degree from the space PETSc keeps the coordinates in, so no node
+    !> count is counted here. The list is a whitelist: a shape or a degree that
+    !> is not on it is rejected rather than approximated by a neighbour.
     subroutine classify_cell(self, point, num_nodes, element_type, dimension)
         implicit none
         class(type_mesh_plex), intent(in) :: self
@@ -370,35 +505,43 @@ contains
 
         PetscErrorCode :: ierr
         DMPolytopeType :: polytope
+        integer(int32) :: order
 
         call DMPlexGetCellType(self%dm, point, polytope, ierr)
+        if (ierr /= 0) error stop "PETSc could not report the shape of a cell"
+        order = self%coordinate_order()
 
         element_type = -1
         dimension = -1
 
         if (polytope%v == DM_POLYTOPE_POINT%v) then
             dimension = 0
-            if (num_nodes == 1) element_type = FE_TYPE%VERTEX%ID
+            element_type = FE_TYPE%VERTEX%ID
         else if (polytope%v == DM_POLYTOPE_SEGMENT%v) then
             dimension = 1
-            if (num_nodes == 2) element_type = FE_TYPE%LINE%ID
-            if (num_nodes == 3) element_type = FE_TYPE%QUADRATIC_EDGE%ID
+            if (order == 1) element_type = FE_TYPE%LINE%ID
+            if (order == 2) element_type = FE_TYPE%QUADRATIC_EDGE%ID
+            if (order == 3) element_type = FE_TYPE%LAGRANGE_CURVE%ID
         else if (polytope%v == DM_POLYTOPE_TRIANGLE%v) then
             dimension = 2
-            if (num_nodes == 3) element_type = FE_TYPE%TRIANGLE%ID
-            if (num_nodes == 6) element_type = FE_TYPE%QUADRATIC_TRIANGLE%ID
+            if (order == 1) element_type = FE_TYPE%TRIANGLE%ID
+            if (order == 2) element_type = FE_TYPE%QUADRATIC_TRIANGLE%ID
+            if (order == 3) element_type = FE_TYPE%LAGRANGE_TRIANGLE%ID
         else if (polytope%v == DM_POLYTOPE_QUADRILATERAL%v) then
             dimension = 2
-            if (num_nodes == 4) element_type = FE_TYPE%QUAD%ID
-            if (num_nodes == 9) element_type = FE_TYPE%BIQUADRATIC_QUAD%ID
+            if (order == 1) element_type = FE_TYPE%QUAD%ID
+            if (order == 2) element_type = FE_TYPE%BIQUADRATIC_QUAD%ID
+            if (order == 3) element_type = FE_TYPE%LAGRANGE_QUADRILATERAL%ID
         else if (polytope%v == DM_POLYTOPE_TETRAHEDRON%v) then
             dimension = 3
-            if (num_nodes == 4) element_type = FE_TYPE%TETRA%ID
-            if (num_nodes == 10) element_type = FE_TYPE%QUADRATIC_TETRA%ID
+            if (order == 1) element_type = FE_TYPE%TETRA%ID
+            if (order == 2) element_type = FE_TYPE%QUADRATIC_TETRA%ID
+            if (order == 3) element_type = FE_TYPE%LAGRANGE_TETRAHEDRON%ID
         else if (polytope%v == DM_POLYTOPE_HEXAHEDRON%v) then
             dimension = 3
-            if (num_nodes == 8) element_type = FE_TYPE%HEXAHEDRON%ID
-            if (num_nodes == 27) element_type = FE_TYPE%TRIQUADRATIC_HEXAHEDRON%ID
+            if (order == 1) element_type = FE_TYPE%HEXAHEDRON%ID
+            if (order == 2) element_type = FE_TYPE%TRIQUADRATIC_HEXAHEDRON%ID
+            if (order == 3) element_type = FE_TYPE%LAGRANGE_HEXAHEDRON%ID
         end if
 
         if (element_type < 0) then
@@ -430,7 +573,7 @@ contains
             if (self%cell_dimension(cell) /= self%dimension) cycle
             call get_cell_nodes(self, self%cell_point(cell), nodes, count)
             do i = 1, count
-                node = self%point_node(nodes(i) - int(self%coord_start, int32) + 1)
+                node = nodes(i)
                 node_offset(node + 1) = node_offset(node + 1) + 1
                 total_entries = total_entries + 1
             end do
@@ -448,7 +591,7 @@ contains
             if (self%cell_dimension(cell) /= self%dimension) cycle
             call get_cell_nodes(self, self%cell_point(cell), nodes, count)
             do i = 1, count
-                node = self%point_node(nodes(i) - int(self%coord_start, int32) + 1)
+                node = nodes(i)
                 node_cell(node_offset(node) + node_fill(node)) = cell
                 node_fill(node) = node_fill(node) + 1
             end do
@@ -461,7 +604,7 @@ contains
             if (self%cell_dimension(cell) /= self%dimension) cycle
             call get_cell_nodes(self, self%cell_point(cell), nodes, count)
             do i = 1, count
-                node = self%point_node(nodes(i) - int(self%coord_start, int32) + 1)
+                node = nodes(i)
                 do j = node_offset(node), node_offset(node + 1) - 1
                     neighbour = node_cell(j)
                     if (self%cell_color(neighbour) > 0) forbidden(self%cell_color(neighbour)) = cell
@@ -497,13 +640,14 @@ contains
         PetscErrorCode :: ierr
         PetscSection :: section, global_section
         PetscInt :: point, offset
-        integer(int32) :: node
+        integer(int32) :: node, index, local
 
         call PetscSectionCreate(PETSC_COMM_WORLD, section, ierr)
         call PetscSectionSetChart(section, self%coord_start, self%coord_end, ierr)
-        do node = 1, self%num_nodes
-            call PetscSectionSetDof(section, int(self%node_point(node), PETSC_INT_KIND), &
-                                    int(num_dofs_per_node, PETSC_INT_KIND), ierr)
+        do index = 1, size(self%point_num_nodes)
+            if (self%point_num_nodes(index) <= 0) cycle
+            call PetscSectionSetDof(section, int(index - 1, PETSC_INT_KIND) + self%coord_start, &
+                                    int(self%point_num_nodes(index) * num_dofs_per_node, PETSC_INT_KIND), ierr)
         end do
         call PetscSectionSetUp(section, ierr)
 
@@ -518,17 +662,21 @@ contains
         if (allocated(layout%node_dof_base)) deallocate (layout%node_dof_base)
         allocate (layout%node_dof_base(max(self%num_nodes, 1)))
 
-        do node = 1, self%num_nodes
-            point = int(self%node_point(node), PETSC_INT_KIND)
+        do index = 1, size(self%point_num_nodes)
+            if (self%point_num_nodes(index) <= 0) cycle
+            point = int(index - 1, PETSC_INT_KIND) + self%coord_start
             call PetscSectionGetOffset(global_section, point, offset, ierr)
-            if (offset >= 0) then
-                layout%node_dof_base(node) = int(offset, int32)
-            else
-                ! A node this rank only sees as a ghost stores -(owner offset+1).
-                ! Assembling into the owner's index is what sums the two ranks'
-                ! contributions.
-                layout%node_dof_base(node) = int(-offset, int32) - 1
-            end if
+            do local = 1, self%point_num_nodes(index)
+                node = self%point_first_node(index) + local - 1
+                if (offset >= 0) then
+                    layout%node_dof_base(node) = int(offset, int32) + (local - 1) * num_dofs_per_node
+                else
+                    ! A node this rank only sees as a ghost stores
+                    ! -(owner offset + 1). Assembling into the owner's index is
+                    ! what sums the two ranks' contributions.
+                    layout%node_dof_base(node) = int(-offset, int32) - 1 + (local - 1) * num_dofs_per_node
+                end if
+            end do
         end do
 
         layout%num_local_dofs = count(self%node_is_owned) * num_dofs_per_node
@@ -596,7 +744,7 @@ contains
 
         PetscErrorCode :: ierr
         PetscInt :: v_start, v_end, point
-        integer(int32) :: node
+        integer(int32) :: index
 
         call DMPlexGetDepthStratum(self%dm, 0_PETSC_INT_KIND, v_start, v_end, ierr)
 
@@ -609,10 +757,10 @@ contains
         count = 0
         do point = v_start, v_end - 1
             if (point < self%coord_start .or. point >= self%coord_end) cycle
-            node = self%point_node(int(point - self%coord_start, int32) + 1)
-            if (node <= 0) cycle
+            index = int(point - self%coord_start, int32) + 1
+            if (self%point_num_nodes(index) <= 0) cycle
             count = count + 1
-            nodes(count) = node
+            nodes(count) = self%point_first_node(index)
         end do
     end subroutine get_vertex_nodes_mesh_plex
 
@@ -644,7 +792,7 @@ contains
             num_corners = 2
             topology_name = "Polyline"
         case (2)
-            if (nodes_per_cell == 3 .or. nodes_per_cell == 6) then
+            if (nodes_per_cell == 3 .or. nodes_per_cell == 6 .or. nodes_per_cell == 10) then
                 num_corners = 3
                 topology_name = "Triangle"
             else
@@ -663,37 +811,68 @@ contains
     end subroutine get_visualisation_shape_mesh_plex
 
     !> Polynomial order and shape of the interior elements, read off the mesh.
+    !> The degree and the shape of the mesh, both as PETSc reports them.
     subroutine get_element_shape_mesh_plex(self, element_order, is_simplex)
         implicit none
         class(type_mesh_plex), intent(in) :: self
         integer(int32), intent(inout) :: element_order
         PetscBool, intent(inout) :: is_simplex
 
-        integer(int32) :: cell, nodes_per_cell
+        PetscErrorCode :: ierr
+        PetscInt :: c_start, c_end
+        DMPolytopeType :: polytope
 
-        element_order = 1
+        element_order = self%coordinate_order()
         is_simplex = PETSC_FALSE
-        nodes_per_cell = 0
 
-        do cell = 1, self%num_cells
-            if (self%cell_dimension(cell) /= self%dimension) cycle
-            nodes_per_cell = self%cell_num_nodes(cell)
-            exit
-        end do
-        if (nodes_per_cell <= 0) return
+        call DMPlexGetHeightStratum(self%dm, 0_PETSC_INT_KIND, c_start, c_end, ierr)
+        if (ierr /= 0 .or. c_end <= c_start) return
 
-        select case (self%dimension)
-        case (1)
-            if (nodes_per_cell >= 3) element_order = 2
-        case (2)
-            ! 3 or 6 nodes is a triangle, 4 or 9 a quadrilateral.
-            if (nodes_per_cell == 3 .or. nodes_per_cell == 6) is_simplex = PETSC_TRUE
-            if (nodes_per_cell == 6 .or. nodes_per_cell == 9) element_order = 2
-        case (3)
-            if (nodes_per_cell == 4 .or. nodes_per_cell == 10) is_simplex = PETSC_TRUE
-            if (nodes_per_cell == 10 .or. nodes_per_cell == 27) element_order = 2
-        end select
+        call DMPlexGetCellType(self%dm, c_start, polytope, ierr)
+        if (ierr /= 0) return
+        if (polytope%v == DM_POLYTOPE_TRIANGLE%v .or. &
+            polytope%v == DM_POLYTOPE_TETRAHEDRON%v) is_simplex = PETSC_TRUE
     end subroutine get_element_shape_mesh_plex
+
+    !> Degree of the space PETSc keeps the mesh coordinates in.
+    !>
+    !> This is the sequence PETSc itself uses in
+    !> DMGetCoordinateDegree_Internal(), which it does not expose to Fortran.
+    !> A coordinate DM carrying no finite element describes a mesh of degree
+    !> one, which is also the answer when any step cannot be taken.
+    function coordinate_order_mesh_plex(self) result(order)
+        implicit none
+        class(type_mesh_plex), intent(in) :: self
+        integer(int32) :: order
+
+        PetscErrorCode :: ierr
+        DM :: coordinate_dm
+        PetscObject :: field
+        PetscFE :: fe
+        PetscSpace :: space
+        PetscInt :: num_fields, degree, max_degree
+        character(len=256) :: class_name
+
+        order = 1
+
+        call DMGetCoordinateDM(self%dm, coordinate_dm, ierr)
+        if (ierr /= 0) return
+        call DMGetNumFields(coordinate_dm, num_fields, ierr)
+        if (ierr /= 0 .or. num_fields < 1) return
+
+        call DMGetField(coordinate_dm, 0_PETSC_INT_KIND, PETSC_NULL_DMLABEL, field, ierr)
+        if (ierr /= 0) return
+        call PetscObjectGetClassName(field, class_name, ierr)
+        if (ierr /= 0 .or. trim(class_name) /= "PetscFE") return
+
+        fe%v = field%v
+        call PetscFEGetBasisSpace(fe, space, ierr)
+        if (ierr /= 0) return
+        call PetscSpaceGetDegree(space, degree, max_degree, ierr)
+        if (ierr /= 0 .or. degree < 1) return
+
+        order = int(degree, int32)
+    end function coordinate_order_mesh_plex
 
     !> A matrix with the layout, sparsity and parallel distribution the DM
     !> derives from the section installed by create_dof_layout.
@@ -792,22 +971,19 @@ contains
         real(real64), intent(inout) :: points(:, :)
 
         PetscErrorCode :: ierr
-        PetscSection :: section
         Vec :: coordinates
         PetscScalar, pointer :: values(:)
-        PetscInt :: offset, coord_dim
         integer(int32) :: node, k
 
         points = 0.0d0
-        call DMGetCoordinateDim(self%dm, coord_dim, ierr)
-        call DMGetCoordinateSection(self%dm, section, ierr)
         call DMGetCoordinatesLocal(self%dm, coordinates, ierr)
 
+        ! The coordinate storage runs node by node, which is how the nodes were
+        ! numbered, so this is a copy rather than a lookup.
         call VecGetArrayRead(coordinates, values, ierr)
         do node = 1, self%num_nodes
-            call PetscSectionGetOffset(section, int(self%node_point(node), PETSC_INT_KIND), offset, ierr)
-            do k = 1, min(int(coord_dim, int32), size(points, 1))
-                points(k, node) = real(values(offset + k), real64)
+            do k = 1, min(self%coordinate_dim, size(points, 1))
+                points(k, node) = real(values((node - 1) * self%coordinate_dim + k), real64)
             end do
         end do
         call VecRestoreArrayRead(coordinates, values, ierr)
@@ -832,7 +1008,7 @@ contains
         if (.not. allocated(connectivity)) allocate (connectivity(max(count, 1)))
 
         do i = 1, count
-            connectivity(i) = self%point_node(nodes(i) - int(self%coord_start, int32) + 1)
+            connectivity(i) = nodes(i)
         end do
 
         if (allocated(nodes)) deallocate (nodes)
@@ -891,43 +1067,45 @@ contains
         integer(int32), intent(inout) :: count
 
         PetscErrorCode :: ierr
-        PetscSection :: section
         PetscInt, pointer :: closure(:)
-        PetscInt :: num_closure, i, dof
-        PetscInt :: v_start, v_end, e_start, e_end
-        integer(int32) :: stratum
-
-        call DMGetCoordinateSection(self%dm, section, ierr)
-        call DMPlexGetDepthStratum(self%dm, 0_PETSC_INT_KIND, v_start, v_end, ierr)
-        call DMPlexGetDepthStratum(self%dm, 1_PETSC_INT_KIND, e_start, e_end, ierr)
+        PetscInt :: num_closure, i
+        integer(int32) :: index, local, capacity
 
         nullify (closure)
         call DMPlexGetTransitiveClosure(self%dm, int(point, PETSC_INT_KIND), PETSC_TRUE, &
                                         num_closure, closure, ierr)
 
+        ! A closure point can carry several nodes, so the room needed is the
+        ! number of values on the points, not the number of points.
+        capacity = 0
+        do i = 1, 2 * num_closure, 2
+            if (closure(i) < self%coord_start .or. closure(i) >= self%coord_end) cycle
+            capacity = capacity + self%point_num_nodes(int(closure(i) - self%coord_start, int32) + 1)
+        end do
         if (allocated(nodes)) then
-            if (size(nodes) < int(2 * num_closure, int32)) deallocate (nodes)
+            if (size(nodes) < capacity) deallocate (nodes)
         end if
-        if (.not. allocated(nodes)) allocate (nodes(2 * num_closure))
+        if (.not. allocated(nodes)) allocate (nodes(max(capacity, 1)))
 
+        ! Straight closure order, which is how PetscFE numbers its basis for the
+        ! tensor cells. A point carrying several nodes is read in the direction
+        ! the cell sees it, or two of its nodes would swap places.
         count = 0
-        do stratum = 1, 3
-            do i = 1, 2 * num_closure, 2
-                select case (stratum)
-                case (1)
-                    if (closure(i) < v_start .or. closure(i) >= v_end) cycle
-                case (2)
-                    if (closure(i) < e_start .or. closure(i) >= e_end) cycle
-                case default
-                    if (closure(i) >= v_start .and. closure(i) < v_end) cycle
-                    if (closure(i) >= e_start .and. closure(i) < e_end) cycle
-                end select
-                if (closure(i) < self%coord_start .or. closure(i) >= self%coord_end) cycle
-                call PetscSectionGetDof(section, closure(i), dof, ierr)
-                if (dof <= 0) cycle
-                count = count + 1
-                nodes(count) = int(closure(i), int32)
-            end do
+        do i = 1, 2 * num_closure, 2
+            if (closure(i) < self%coord_start .or. closure(i) >= self%coord_end) cycle
+            index = int(closure(i) - self%coord_start, int32) + 1
+            if (self%point_num_nodes(index) <= 0) cycle
+            if (closure(i + 1) >= 0) then
+                do local = 1, self%point_num_nodes(index)
+                    count = count + 1
+                    nodes(count) = self%point_first_node(index) + local - 1
+                end do
+            else
+                do local = self%point_num_nodes(index), 1, -1
+                    count = count + 1
+                    nodes(count) = self%point_first_node(index) + local - 1
+                end do
+            end if
         end do
 
         call DMPlexRestoreTransitiveClosure(self%dm, int(point, PETSC_INT_KIND), PETSC_TRUE, &

@@ -191,10 +191,8 @@ module app_ftcms
         !> Quadrature depth selected for each element by the latest complete
         !> matrix assembly.  Residual-only and finite-difference assemblies
         !> reuse it so their discrete residual has one fixed integration rule.
-        integer(int32), allocatable :: subcell_active_depth(:)
         !> True when the depth-d/depth-(d+1) comparison still exceeded the
         !> tolerance at the maximum supported depth.
-        logical, allocatable :: subcell_depth_unresolved(:)
 
         type(type_variable) :: porosity
         type(type_variable) :: temperature

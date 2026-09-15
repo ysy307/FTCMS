@@ -6,14 +6,9 @@ module module_domain
     use :: module_fe, only: &
         abst_fe, &
         holder_fes, &
-        type_side_first, &
-        type_side_second, &
-        type_triangle_first, &
-        type_triangle_second, &
-        type_square_first, &
-        type_square_second, &
         create_fe, &
         type_fe_manager
+
     use :: domain_adjacency, only: &
         type_node_adjacency, &
         type_map_node_to_element
@@ -36,12 +31,6 @@ module module_domain
     ! Public types
     public :: abst_fe
     public :: holder_fes
-    public :: type_side_first
-    public :: type_side_second
-    public :: type_triangle_first
-    public :: type_triangle_second
-    public :: type_square_first
-    public :: type_square_second
     public :: create_fe
     public :: type_fe_manager
 

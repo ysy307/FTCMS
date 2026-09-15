@@ -119,34 +119,36 @@ RUN mkdir -p "$HOME/.local" && \
     test -x "$HOME/.local/bin/agy"
 
 # --- 9. Add a helper script for project-local Codex MCP registration ---
+
 USER root
 
-RUN cat > /usr/local/bin/register-codex-mcp <<'EOF' && \
-    chmod 0755 /usr/local/bin/register-codex-mcp
-    #!/usr/bin/env bash
-    set -euo pipefail
+RUN cat > /usr/local/bin/register-codex-mcp <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
 
-    cd "${1:-/workspaces/FTCMS}"
+cd "${1:-/workspaces/FTCMS}"
 
-    if ! command -v claude >/dev/null 2>&1; then
+if ! command -v claude >/dev/null 2>&1; then
     echo "claude command was not found."
     exit 1
-    fi
+fi
 
-    if ! command -v codex >/dev/null 2>&1; then
+if ! command -v codex >/dev/null 2>&1; then
     echo "codex command was not found."
     exit 1
-    fi
+fi
 
-    claude mcp add --scope project codex -- codex mcp-server
-    claude mcp list
-    EOF
+claude mcp add --scope project codex -- codex mcp-server
+claude mcp list
+EOF
 
-    RUN ln -sf /home/${USERNAME}/.local/bin/claude /usr/local/bin/claude && \
-        ln -sf /home/${USERNAME}/.local/bin/codex /usr/local/bin/codex && \
-        chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
+RUN chmod 0755 /usr/local/bin/register-codex-mcp && \
+    ln -sf /home/${USERNAME}/.local/bin/claude /usr/local/bin/claude && \
+    ln -sf /home/${USERNAME}/.local/bin/codex /usr/local/bin/codex && \
+    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
 
-    USER ${USERNAME}
+USER ${USERNAME}
 
-    # --- 10. Default command ---
-    CMD ["/usr/bin/zsh"]
+# --- 10. Default command ---
+
+CMD ["/usr/bin/zsh"]

@@ -7,9 +7,7 @@ module domain_fe_factory
     use :: stdlib_strings, only:to_string
     use :: module_core, only:FE_TYPE
     use :: domain_base_fe, only:abst_fe
-    use :: domain_fe_side
-    use :: domain_fe_element
-    use :: domain_fe_volume
+    use :: domain_fe_petsc, only:construct_fe_petsc
 
     implicit none
     private
@@ -32,47 +30,43 @@ contains
 
         character(len=*), parameter :: func_name = "create_fe"
 
-        if (FE_TYPE%LINE == id) then
-            fe = construct_side_first(integration_order)
-        else if (FE_TYPE%QUADRATIC_EDGE == id) then
-            fe = construct_side_second(integration_order)
-        else if (FE_TYPE%TRIANGLE == id) then
-            fe = construct_triangle_first(integration_order)
-        else if (FE_TYPE%QUAD == id) then
-            fe = construct_square_first(integration_order)
-        else if (FE_TYPE%QUADRATIC_TRIANGLE == id) then
-            fe = construct_triangle_second(integration_order)
-        else if (FE_TYPE%QUADRATIC_QUAD == id) then
-            fe = construct_square_second(integration_order)
-        else if (FE_TYPE%LAGRANGE_TRIANGLE == id .or. FE_TYPE%HIGHER_ORDER_TRIANGLE == id) then
-            fe = construct_triangle_third(integration_order)
-        else if (FE_TYPE%LAGRANGE_QUADRILATERAL == id) then
-            fe = construct_square_third(integration_order)
-        else if (FE_TYPE%BIQUADRATIC_QUAD == id) then
-            fe = construct_square_second_lagrange(integration_order)
-        else if (FE_TYPE%HIGHER_ORDER_QUAD == id) then
-            fe = construct_square_third_serendipity(integration_order)
-        else if (FE_TYPE%TETRA == id) then
-            fe = construct_tetra_first(integration_order)
-        else if (FE_TYPE%QUADRATIC_TETRA == id) then
-            fe = construct_tetra_second(integration_order)
-        else if (FE_TYPE%LAGRANGE_TETRAHEDRON == id .or. FE_TYPE%HIGHER_ORDER_TETRAHEDRON == id) then
-            fe = construct_tetra_third(integration_order)
-        else if (FE_TYPE%HEXAHEDRON == id) then
-            fe = construct_hexa_first(integration_order)
-        else if (FE_TYPE%TRIQUADRATIC_HEXAHEDRON == id) then
-            fe = construct_hexa_second(integration_order)
-        else if (FE_TYPE%QUADRATIC_HEXAHEDRON == id) then
-            fe = construct_hexa_second_serendipity(integration_order)
-        else if (FE_TYPE%LAGRANGE_HEXAHEDRON == id) then
-            fe = construct_hexa_third(integration_order)
-        else if (FE_TYPE%HIGHER_ORDER_HEXAHEDRON == id) then
-            fe = construct_hexa_third_serendipity(integration_order)
-        else
+        ! The basis comes from PETSc, in the same order the DMPlex closure
+        ! numbers the nodes, so no element type needs a convention of its own.
+        select case (id)
+        case (3)      ! line, 2 nodes
+            fe = construct_fe_petsc(id, 1, 1, .false., integration_order)
+        case (21)     ! quadratic edge, 3 nodes
+            fe = construct_fe_petsc(id, 1, 2, .false., integration_order)
+        case (68)     ! cubic edge, 4 nodes
+            fe = construct_fe_petsc(id, 1, 3, .false., integration_order)
+        case (5)      ! triangle, 3 nodes
+            fe = construct_fe_petsc(id, 2, 1, .true., integration_order)
+        case (22)     ! quadratic triangle, 6 nodes
+            fe = construct_fe_petsc(id, 2, 2, .true., integration_order)
+        case (69)     ! cubic triangle, 10 nodes
+            fe = construct_fe_petsc(id, 2, 3, .true., integration_order)
+        case (9)      ! quadrilateral, 4 nodes
+            fe = construct_fe_petsc(id, 2, 1, .false., integration_order)
+        case (28)     ! biquadratic quadrilateral, 9 nodes
+            fe = construct_fe_petsc(id, 2, 2, .false., integration_order)
+        case (70)     ! bicubic quadrilateral, 16 nodes
+            fe = construct_fe_petsc(id, 2, 3, .false., integration_order)
+        case (10)     ! tetrahedron, 4 nodes
+            fe = construct_fe_petsc(id, 3, 1, .true., integration_order)
+        case (24)     ! quadratic tetrahedron, 10 nodes
+            fe = construct_fe_petsc(id, 3, 2, .true., integration_order)
+        case (71)     ! cubic tetrahedron, 20 nodes
+            fe = construct_fe_petsc(id, 3, 3, .true., integration_order)
+        case (12)     ! hexahedron, 8 nodes
+            fe = construct_fe_petsc(id, 3, 1, .false., integration_order)
+        case (29)     ! triquadratic hexahedron, 27 nodes
+            fe = construct_fe_petsc(id, 3, 2, .false., integration_order)
+        case (72)     ! cubic hexahedron, 64 nodes
+            fe = construct_fe_petsc(id, 3, 3, .false., integration_order)
+        case default
             call global_logger%log_error( &
-                func_name//": No constructor for ID = " &
-                //to_string(id))
-        end if
+                func_name//": No element for ID = "//to_string(id))
+        end select
 
     end function create_fe
 

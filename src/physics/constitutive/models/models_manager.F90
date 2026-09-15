@@ -287,7 +287,6 @@ contains
     end function is_segregation_active
 
     ! Returns .true. when a GCC model is active. The hydraulic element uses
-    ! this flag to enable subcell quadrature across the freezing interface;
     ! it does not add a separate cryogenic Darcy driving term.
     pure function has_cryo_transport(self) result(active)
         implicit none

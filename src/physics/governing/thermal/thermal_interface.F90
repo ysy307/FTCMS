@@ -20,12 +20,6 @@ module physics_governing_thermal
         integer(int32) :: computation_type
         integer(int32) :: computation_dimension
         logical :: enable_vapor_transport = .true.
-        !> Gate for the interface-split subcell quadrature (see
-        !> thermal_matrix.F90 cut branch and domain_fe_subcell). Same source
-        !> as type_hydraulic%enable_fringe_subcell_quadrature
-        !> (input%basic%analysis_controls%enable_fringe_subcell_quadrature),
-        !> so the two governing blocks are never gated differently.
-        logical :: enable_fringe_subcell_quadrature = .true.
         type(type_constitutive_manager) :: physics
 
         ! Enthalpy cache for BDF history terms
@@ -43,6 +37,7 @@ module physics_governing_thermal
         procedure, pass(self), private :: assemble_local_picard => assemble_local_picard_thermal
 
         procedure, pass(self), public :: compute_mass_term => compute_mass_term_thermal
+        procedure, pass(self), public :: compute_apparent_capacity => compute_apparent_capacity_thermal
         procedure, pass(self), public :: compute_diffusion_term => compute_diffusion_term_thermal
         procedure, pass(self), private :: compute_advective_term => compute_advective_term_thermal
         procedure, pass(self), private :: compute_latent_term => compute_latent_term_thermal
@@ -173,6 +168,15 @@ module physics_governing_thermal
             integer(int32), intent(in), optional :: scheme_opt
 
         end subroutine compute_mass_term_thermal
+
+        module subroutine compute_apparent_capacity_thermal(self, material_id, state, C_app)
+            implicit none
+            class(type_thermal), intent(in) :: self
+            integer(int32), intent(in) :: material_id
+            type(type_state), intent(in) :: state
+            real(real64), intent(inout) :: C_app
+
+        end subroutine compute_apparent_capacity_thermal
 
         module subroutine compute_diffusion_term_thermal(self, material_id, state, D_TT)
             implicit none
