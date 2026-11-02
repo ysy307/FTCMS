@@ -38,21 +38,30 @@
 module app_mixed_hydraulic_pointwise
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use, intrinsic :: iso_c_binding, only: c_int, c_double, c_ptr, c_loc, c_f_pointer
+    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use :: petscsys
     use :: app_mixed_hydraulic_physics, only:MIXED_DIMENSION, &
                                              C_DT, C_FLUX_SCALE, C_PRESSURE_SCALE, C_LENGTH_SCALE, &
                                              C_DENSITY, C_GRAVITY_X, C_GRAVITY_Z, &
-                                             A_INVERSE_MOBILITY, A_STORAGE, A_SOURCE, &
-                                             A_PRESSURE_OLD, A_BC_PRESSURE
+                                             A_INVERSE_MOBILITY, A_SOURCE, &
+                                             A_PRESSURE_OLD, A_BC_PRESSURE, A_MATERIAL
+    use :: app_mixed_hydraulic_closure, only:eval_storage, note_mobility_fault, &
+                                             eval_relative_conductivity, &
+                                             eval_relative_conductivity_tangent
     implicit none
     private
 
     public :: f0_flux, f1_flux, f0_conservation
-    public :: g0_flux_flux, g2_flux_pressure, g1_pressure_flux, g0_pressure_pressure
+    public :: g0_flux_flux, g0_flux_pressure, g2_flux_pressure
+    public :: g1_pressure_flux, g0_pressure_pressure
     public :: bd_f0_flux_pressure
     public :: bc_essential_flux
     public :: set_flux_boundary_value, flux_boundary_context, reset_flux_boundaries
     public :: MAX_FLUX_BOUNDARIES
+    ! The resistance is layout independent, so the coupled column forms it
+    ! through this one rather than writing the product again. The auxiliary
+    ! readers are not: they carry this layout's field numbers.
+    public :: resistance_of
 
     !> How many prescribed-flux boundaries one run may register.
     integer(int32), parameter :: MAX_FLUX_BOUNDARIES = 16
@@ -107,7 +116,7 @@ contains
         ctx = c_loc(flux_boundary_values(slot))
     end function flux_boundary_context
 
-    !> The cell's inverse mobility, row-major, from its auxiliary field.
+    !> The cell's saturated inverse mobility, row-major, from its auxiliary field.
     pure function inverse_mobility_of(a, a_off) result(inverse_mobility)
         implicit none
         PetscScalar, intent(in) :: a(*)
@@ -121,8 +130,67 @@ contains
         end do
     end function inverse_mobility_of
 
+    !> The cell's inverse mobility at the current pressure,
+    !> \(\mathbf\Lambda^{-1}(p)=\mathbf\Lambda_{\mathrm{sat}}^{-1}/k_r(p)\).
+    !>
+    !> `ok` is false when the closure has no usable relative conductivity there,
+    !> which is recorded rather than replaced by a floor.
+    subroutine pressure_inverse_mobility(a, a_off, slot, pressure, inverse_mobility, ok)
+        implicit none
+        PetscScalar, intent(in) :: a(*)
+        PetscInt, intent(in) :: a_off(*)
+        integer(int32), intent(in) :: slot
+        real(real64), intent(in) :: pressure
+        real(real64), intent(inout) :: inverse_mobility(MIXED_DIMENSION*MIXED_DIMENSION)
+        logical, intent(inout) :: ok
+
+        real(real64) :: relative
+
+        relative = 1.0_real64
+        ok = .false.
+        call eval_relative_conductivity(slot, pressure, relative, ok)
+        if (.not. ok) then
+            call note_mobility_fault(slot, pressure)
+            return
+        end if
+        inverse_mobility = inverse_mobility_of(a, a_off)/relative
+    end subroutine pressure_inverse_mobility
+
+    !> \(\mathbf\Lambda^{-1}(p)\mathbf q\), the resistance Darcy's law balances.
+    pure function resistance_of(inverse_mobility, flux) result(resistance)
+        implicit none
+        real(real64), intent(in) :: inverse_mobility(MIXED_DIMENSION*MIXED_DIMENSION)
+        real(real64), intent(in) :: flux(MIXED_DIMENSION)
+        real(real64) :: resistance(MIXED_DIMENSION)
+
+        integer(int32) :: i, j
+
+        do i = 1, MIXED_DIMENSION
+            resistance(i) = 0.0_real64
+            do j = 1, MIXED_DIMENSION
+                resistance(i) = resistance(i) + inverse_mobility((i - 1)*MIXED_DIMENSION + j)*flux(j)
+            end do
+        end do
+    end function resistance_of
+
+    !> The cell's slot in the storage-law table, from its auxiliary field.
+    pure function material_slot_of(a, a_off) result(slot)
+        implicit none
+        PetscScalar, intent(in) :: a(*)
+        PetscInt, intent(in) :: a_off(*)
+        integer(int32) :: slot
+
+        slot = nint(real(a(a_off(A_MATERIAL) + 1), real64), int32)
+    end function material_slot_of
+
     !> Darcy's law at a quadrature point,
-    !> \(f_0=(\mathbf\Lambda^{-1}\mathbf q_l-\rho_l\mathbf g)/p_{\mathrm{scale}}\).
+    !> \(f_0=(\mathbf\Lambda^{-1}(p)\mathbf q_l-\rho_l\mathbf g)/p_{\mathrm{scale}}\).
+    !>
+    !> The inverse mobility is the cell's saturated one divided by the relative
+    !> conductivity of the pressure at this point, so an unsaturated cell
+    !> resists more without anything having inverted a state-dependent tensor.
+    !> A pressure the closure cannot supply a conductivity at leaves a nonfinite
+    !> residual, which is what refuses the step; the cause is recorded first.
     subroutine f0_flux( &
         dim, nf, nf_aux, u_off, u_off_x, u, u_t, u_x, &
         a_off, a_off_x, a, a_t, a_x, time, x, &
@@ -150,8 +218,10 @@ contains
 
         real(real64) :: inverse_mobility(MIXED_DIMENSION*MIXED_DIMENSION)
         real(real64) :: flux(MIXED_DIMENSION), gravity(MIXED_DIMENSION)
-        real(real64) :: flux_scale, pressure_scale, density, resistance
-        integer(int32) :: i, j
+        real(real64) :: resistance(MIXED_DIMENSION)
+        real(real64) :: flux_scale, pressure_scale, density, pressure
+        integer(int32) :: i, slot
+        logical :: ok
 
         flux_scale = real(constants(C_FLUX_SCALE), real64)
         pressure_scale = real(constants(C_PRESSURE_SCALE), real64)
@@ -159,17 +229,24 @@ contains
         gravity(1) = real(constants(C_GRAVITY_X), real64)
         gravity(2) = real(constants(C_GRAVITY_Z), real64)
 
-        inverse_mobility = inverse_mobility_of(a, a_off)
+        pressure = pressure_scale*real(u(u_off(2) + 1), real64)
+        slot = material_slot_of(a, a_off)
+        ok = .false.
+        call pressure_inverse_mobility(a, a_off, slot, pressure, inverse_mobility, ok)
+        if (.not. ok) then
+            do i = 1, MIXED_DIMENSION
+                f0(i) = real(ieee_value(1.0_real64, ieee_quiet_nan), PETSC_REAL_KIND)
+            end do
+            return
+        end if
+
         do i = 1, MIXED_DIMENSION
             flux(i) = flux_scale*real(u(u_off(1) + i), real64)
         end do
+        resistance = resistance_of(inverse_mobility, flux)
 
         do i = 1, MIXED_DIMENSION
-            resistance = 0.0_real64
-            do j = 1, MIXED_DIMENSION
-                resistance = resistance + inverse_mobility((i - 1)*MIXED_DIMENSION + j)*flux(j)
-            end do
-            f0(i) = real((resistance - density*gravity(i))/pressure_scale, PETSC_REAL_KIND)
+            f0(i) = real((resistance(i) - density*gravity(i))/pressure_scale, PETSC_REAL_KIND)
         end do
     end subroutine f0_flux
 
@@ -223,10 +300,12 @@ contains
 
     !> Water conservation, \(f_0=(D_tW+\nabla\cdot\mathbf q_l-s)L/q_{\mathrm{scale}}\).
     !>
-    !> The storage rate differences the stored quantity itself rather than
-    !> multiplying a capacity by a pressure increment; with the linear law of
-    !> this stage the two agree, and the difference form is what the freezing
-    !> closure will need.
+    !> The storage rate differences the stored quantity itself,
+    !> \((W(p^{n+1})-W(p^{n}))/\Delta t\), rather than multiplying a capacity by
+    !> a pressure increment. For a nonlinear retention curve the two are
+    !> different functions, and only the difference form conserves water: the
+    !> inventory a step transports is then exactly the change in \(W\), whatever
+    !> the iterate was when the capacity was last evaluated.
     subroutine f0_conservation( &
         dim, nf, nf_aux, u_off, u_off_x, u, u_t, u_x, &
         a_off, a_off_x, a, a_t, a_x, time, x, &
@@ -253,8 +332,9 @@ contains
         PetscScalar, intent(inout) :: f0(*)
 
         real(real64) :: flux_scale, pressure_scale, length_scale, dt
-        real(real64) :: divergence, storage, pressure_old, source, storage_rate
-        integer(int32) :: c
+        real(real64) :: divergence, pressure_old, source, storage_rate
+        real(real64) :: stored_now, stored_old, capacity
+        integer(int32) :: c, slot
 
         flux_scale = real(constants(C_FLUX_SCALE), real64)
         pressure_scale = real(constants(C_PRESSURE_SCALE), real64)
@@ -267,19 +347,29 @@ contains
             divergence = divergence + real(u_x(u_off_x(1) + (c - 1)*MIXED_DIMENSION + c), real64)
         end do
 
-        storage = real(a(a_off(A_STORAGE) + 1), real64)
         pressure_old = real(a(a_off(A_PRESSURE_OLD) + 1), real64)
         source = real(a(a_off(A_SOURCE) + 1), real64)
+        slot = material_slot_of(a, a_off)
 
         storage_rate = 0.0_real64
         if (dt > 0.0_real64) then
-            storage_rate = storage*(pressure_scale*real(u(u_off(2) + 1), real64) - pressure_old)/dt
+            stored_now = 0.0_real64
+            stored_old = 0.0_real64
+            capacity = 0.0_real64
+            call eval_storage(slot, pressure_scale*real(u(u_off(2) + 1), real64), stored_now, capacity)
+            call eval_storage(slot, pressure_old, stored_old, capacity)
+            storage_rate = (stored_now - stored_old)/dt
         end if
 
         f0(1) = real((storage_rate + flux_scale*divergence - source)*length_scale/flux_scale, PETSC_REAL_KIND)
     end subroutine f0_conservation
 
-    !> \(\partial f_0^{q}/\partial\mathbf q=\mathbf\Lambda^{-1}q_{\mathrm{scale}}/p_{\mathrm{scale}}\).
+    !> \(\partial f_0^{q}/\partial\mathbf q=\mathbf\Lambda^{-1}(p)q_{\mathrm{scale}}/p_{\mathrm{scale}}\).
+    !>
+    !> The same inverse mobility the residual beside it evaluates, at the same
+    !> pressure. A cell whose conductivity is unusable contributes nothing here:
+    !> the residual has already written a nonfinite value that refuses the step,
+    !> and a nonfinite matrix entry would be handed to the factorisation instead.
     subroutine g0_flux_flux( &
         dim, nf, nf_aux, u_off, u_off_x, u, u_t, u_x, &
         a_off, a_off_x, a, a_t, a_x, time, u_t_shift, x, &
@@ -307,17 +397,114 @@ contains
         PetscScalar, intent(inout) :: g0(*)
 
         real(real64) :: inverse_mobility(MIXED_DIMENSION*MIXED_DIMENSION)
-        real(real64) :: weight
-        integer(int32) :: k
+        real(real64) :: weight, pressure, pressure_scale
+        integer(int32) :: k, slot
+        logical :: ok
 
-        weight = real(constants(C_FLUX_SCALE), real64)/real(constants(C_PRESSURE_SCALE), real64)
-        inverse_mobility = inverse_mobility_of(a, a_off)
+        pressure_scale = real(constants(C_PRESSURE_SCALE), real64)
+        weight = real(constants(C_FLUX_SCALE), real64)/pressure_scale
+
+        pressure = pressure_scale*real(u(u_off(2) + 1), real64)
+        slot = material_slot_of(a, a_off)
+        ok = .false.
+        call pressure_inverse_mobility(a, a_off, slot, pressure, inverse_mobility, ok)
+        if (.not. ok) then
+            do k = 1, MIXED_DIMENSION*MIXED_DIMENSION
+                g0(k) = 0.0_PETSC_REAL_KIND
+            end do
+            return
+        end if
 
         ! g0 is indexed test component major: g0[fc*Nc_trial + gc].
         do k = 1, MIXED_DIMENSION*MIXED_DIMENSION
             g0(k) = real(inverse_mobility(k)*weight, PETSC_REAL_KIND)
         end do
     end subroutine g0_flux_flux
+
+    !> \(\partial f_0^{q}/\partial\chi=-(\mathrm d\ln k_r/\mathrm dp)\,\mathbf\Lambda^{-1}(p)\mathbf q\).
+    !>
+    !> Differentiating \(\mathbf\Lambda^{-1}(p)=\mathbf\Lambda_{\mathrm{sat}}^{-1}/k_r(p)\)
+    !> gives
+    !>
+    !> \[
+    !>   \frac{\partial}{\partial p}\big(\mathbf\Lambda^{-1}\mathbf q\big)
+    !>   =-\frac{\mathrm d\ln k_r}{\mathrm dp}\,\mathbf\Lambda^{-1}(p)\mathbf q,
+    !> \]
+    !>
+    !> and the two scale factors of the dimensionless unknowns cancel: the row
+    !> is divided by the pressure scale and the pressure trial function is
+    !> measured in it. The differentiated vector is the resistance `f0_flux`
+    !> actually evaluates, at the same pressure and with the same sign, so the
+    !> block is the derivative of the term assembled beside it and not of some
+    !> other conductivity.
+    !>
+    !> It vanishes identically where the flux does, which is why a state with a
+    !> zero flux cannot tell a present tangent from a missing one.
+    subroutine g0_flux_pressure( &
+        dim, nf, nf_aux, u_off, u_off_x, u, u_t, u_x, &
+        a_off, a_off_x, a, a_t, a_x, time, u_t_shift, x, &
+        num_constants, constants, g0 &
+        ) bind(C, name="ftcms_mixed_g0_flux_pressure")
+        implicit none
+        PetscInt, value :: dim
+        PetscInt, value :: nf
+        PetscInt, value :: nf_aux
+        PetscInt, intent(in) :: u_off(*)
+        PetscInt, intent(in) :: u_off_x(*)
+        PetscScalar, intent(in) :: u(*)
+        PetscScalar, intent(in) :: u_t(*)
+        PetscScalar, intent(in) :: u_x(*)
+        PetscInt, intent(in) :: a_off(*)
+        PetscInt, intent(in) :: a_off_x(*)
+        PetscScalar, intent(in) :: a(*)
+        PetscScalar, intent(in) :: a_t(*)
+        PetscScalar, intent(in) :: a_x(*)
+        PetscReal, value :: time
+        PetscReal, value :: u_t_shift
+        PetscReal, intent(in) :: x(*)
+        PetscInt, value :: num_constants
+        PetscScalar, intent(in) :: constants(*)
+        PetscScalar, intent(inout) :: g0(*)
+
+        real(real64) :: saturated_inverse(MIXED_DIMENSION*MIXED_DIMENSION)
+        real(real64) :: inverse_mobility(MIXED_DIMENSION*MIXED_DIMENSION)
+        real(real64) :: flux(MIXED_DIMENSION), resistance(MIXED_DIMENSION)
+        real(real64) :: pressure, pressure_scale, flux_scale, relative, dlog_dp
+        integer(int32) :: i, slot
+        logical :: ok
+
+        do i = 1, MIXED_DIMENSION
+            g0(i) = 0.0_PETSC_REAL_KIND
+        end do
+
+        pressure_scale = real(constants(C_PRESSURE_SCALE), real64)
+        flux_scale = real(constants(C_FLUX_SCALE), real64)
+
+        pressure = pressure_scale*real(u(u_off(2) + 1), real64)
+        slot = material_slot_of(a, a_off)
+
+        relative = 1.0_real64
+        dlog_dp = 0.0_real64
+        ok = .false.
+        call eval_relative_conductivity_tangent(slot, pressure, relative, dlog_dp, ok)
+        if (.not. ok) then
+            call note_mobility_fault(slot, pressure)
+            return
+        end if
+
+        saturated_inverse = inverse_mobility_of(a, a_off)
+        inverse_mobility = saturated_inverse/relative
+        do i = 1, MIXED_DIMENSION
+            flux(i) = flux_scale*real(u(u_off(1) + i), real64)
+        end do
+        resistance = resistance_of(inverse_mobility, flux)
+
+        ! g0[fc*Nc_trial + gc] with one trial component: one entry per flux
+        ! test component.
+        do i = 1, MIXED_DIMENSION
+            g0(i) = real(-dlog_dp*resistance(i), PETSC_REAL_KIND)
+        end do
+    end subroutine g0_flux_pressure
 
     !> \(\partial f_1^{q}/\partial\chi=-\mathbf I\).
     subroutine g2_flux_pressure( &
@@ -407,6 +594,10 @@ contains
     end subroutine g1_pressure_flux
 
     !> \(\partial f_0^{p}/\partial\chi=(\partial W/\partial p)\,p_{\mathrm{scale}}L/(\Delta t\,q_{\mathrm{scale}})\).
+    !>
+    !> The tangent is taken at the current iterate through the same closure the
+    !> residual differences, so it is the derivative of the term assembled
+    !> beside it rather than a capacity frozen at some other state.
     subroutine g0_pressure_pressure( &
         dim, nf, nf_aux, u_off, u_off_x, u, u_t, u_x, &
         a_off, a_off_x, a, a_t, a_x, time, u_t_shift, x, &
@@ -433,13 +624,18 @@ contains
         PetscScalar, intent(in) :: constants(*)
         PetscScalar, intent(inout) :: g0(*)
 
-        real(real64) :: dt, storage
+        real(real64) :: dt, pressure_scale, stored, capacity
+        integer(int32) :: slot
 
         dt = real(constants(C_DT), real64)
-        storage = real(a(a_off(A_STORAGE) + 1), real64)
+        pressure_scale = real(constants(C_PRESSURE_SCALE), real64)
+        slot = material_slot_of(a, a_off)
 
         if (dt > 0.0_real64) then
-            g0(1) = real(storage*real(constants(C_PRESSURE_SCALE), real64) &
+            stored = 0.0_real64
+            capacity = 0.0_real64
+            call eval_storage(slot, pressure_scale*real(u(u_off(2) + 1), real64), stored, capacity)
+            g0(1) = real(capacity*pressure_scale &
                          *real(constants(C_LENGTH_SCALE), real64) &
                          /(dt*real(constants(C_FLUX_SCALE), real64)), PETSC_REAL_KIND)
         else

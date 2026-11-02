@@ -5,6 +5,13 @@
 !> C function pointer. The C side of this module passes those pointers through
 !> unchanged, so the weak form stays in Fortran.
 !>
+!> The DMSNES local hooks are here for the same reason. They take a function
+!> pointer and have no Fortran interface, so a solver that needs to add a term
+!> PETSc's element loop cannot see has no other way to reach them. Those four
+!> declarations bind straight to the PETSc symbols: none of them needs anything
+!> done on the C side, and a pass-through shim would only add a place for the
+!> prototypes to disagree.
+!>
 !> PETSc objects reach C as their opaque handle: a Fortran PetscDS or DM keeps
 !> the address in its %v component, so the caller passes transfer(ds%v, handle)
 !> the same way domain_fe_petsc does for a PetscFE.
@@ -18,6 +25,10 @@ module core_interop_petscds
     public :: petscds_add_boundary_essential
     public :: petscds_add_boundary_natural
     public :: petscds_project_function
+    public :: petscds_set_snes_local_residual
+    public :: petscds_set_snes_local_jacobian
+    public :: petscds_snes_local_residual_fem
+    public :: petscds_snes_local_jacobian_fem
 
     interface
         function ftcms_ds_set_residual(ds, f, f0, f1) &
@@ -90,6 +101,49 @@ module core_interop_petscds
             type(c_ptr), value :: x
             integer(c_int) :: ierr
         end function ftcms_dm_project_function
+
+        function dm_snes_set_function_local(dm, func, ctx) &
+            bind(c, name="DMSNESSetFunctionLocal") result(ierr)
+            import :: c_int, c_ptr, c_funptr
+            implicit none
+            type(c_ptr), value :: dm
+            type(c_funptr), value :: func
+            type(c_ptr), value :: ctx
+            integer(c_int) :: ierr
+        end function dm_snes_set_function_local
+
+        function dm_snes_set_jacobian_local(dm, func, ctx) &
+            bind(c, name="DMSNESSetJacobianLocal") result(ierr)
+            import :: c_int, c_ptr, c_funptr
+            implicit none
+            type(c_ptr), value :: dm
+            type(c_funptr), value :: func
+            type(c_ptr), value :: ctx
+            integer(c_int) :: ierr
+        end function dm_snes_set_jacobian_local
+
+        function dm_plex_snes_residual_fem(dm, local_x, local_f, ctx) &
+            bind(c, name="DMPlexSNESComputeResidualFEM") result(ierr)
+            import :: c_int, c_ptr
+            implicit none
+            type(c_ptr), value :: dm
+            type(c_ptr), value :: local_x
+            type(c_ptr), value :: local_f
+            type(c_ptr), value :: ctx
+            integer(c_int) :: ierr
+        end function dm_plex_snes_residual_fem
+
+        function dm_plex_snes_jacobian_fem(dm, local_x, jacobian, preconditioner, ctx) &
+            bind(c, name="DMPlexSNESComputeJacobianFEM") result(ierr)
+            import :: c_int, c_ptr
+            implicit none
+            type(c_ptr), value :: dm
+            type(c_ptr), value :: local_x
+            type(c_ptr), value :: jacobian
+            type(c_ptr), value :: preconditioner
+            type(c_ptr), value :: ctx
+            integer(c_int) :: ierr
+        end function dm_plex_snes_jacobian_fem
 
     end interface
 
@@ -186,5 +240,58 @@ contains
 
         ierr = ftcms_dm_project_function(dm, time, funcs, c_null_ptr, mode, x)
     end subroutine petscds_project_function
+
+    !> Replace the local residual evaluation the DM's SNES uses.
+    !>
+    !> `func` receives the DM, the local state and the local residual, and is
+    !> called inside PETSc's own scatter and boundary-value glue. It must be a
+    !> `bind(C)` procedure; registering it after `DMPlexSetSNESLocalFEM` is what
+    !> lets a caller add a term to the residual PETSc's element loop assembled.
+    subroutine petscds_set_snes_local_residual(dm, func, ctx, ierr)
+        implicit none
+        type(c_ptr), intent(in) :: dm
+        type(c_funptr), intent(in) :: func
+        type(c_ptr), intent(in) :: ctx
+        integer(c_int), intent(inout) :: ierr
+
+        ierr = dm_snes_set_function_local(dm, func, ctx)
+    end subroutine petscds_set_snes_local_residual
+
+    !> Replace the local Jacobian evaluation the DM's SNES uses.
+    subroutine petscds_set_snes_local_jacobian(dm, func, ctx, ierr)
+        implicit none
+        type(c_ptr), intent(in) :: dm
+        type(c_funptr), intent(in) :: func
+        type(c_ptr), intent(in) :: ctx
+        integer(c_int), intent(inout) :: ierr
+
+        ierr = dm_snes_set_jacobian_local(dm, func, ctx)
+    end subroutine petscds_set_snes_local_jacobian
+
+    !> PETSc's own local FEM residual, so a replacement hook can still use it.
+    subroutine petscds_snes_local_residual_fem(dm, local_x, local_f, ctx, ierr)
+        implicit none
+        type(c_ptr), intent(in) :: dm
+        type(c_ptr), intent(in) :: local_x
+        type(c_ptr), intent(in) :: local_f
+        type(c_ptr), intent(in) :: ctx
+        integer(c_int), intent(inout) :: ierr
+
+        ierr = dm_plex_snes_residual_fem(dm, local_x, local_f, ctx)
+    end subroutine petscds_snes_local_residual_fem
+
+    !> PETSc's own local FEM Jacobian. It zeroes and assembles the matrix it
+    !> is given, so a caller adding entries afterwards assembles again.
+    subroutine petscds_snes_local_jacobian_fem(dm, local_x, jacobian, preconditioner, ctx, ierr)
+        implicit none
+        type(c_ptr), intent(in) :: dm
+        type(c_ptr), intent(in) :: local_x
+        type(c_ptr), intent(in) :: jacobian
+        type(c_ptr), intent(in) :: preconditioner
+        type(c_ptr), intent(in) :: ctx
+        integer(c_int), intent(inout) :: ierr
+
+        ierr = dm_plex_snes_jacobian_fem(dm, local_x, jacobian, preconditioner, ctx)
+    end subroutine petscds_snes_local_jacobian_fem
 
 end module core_interop_petscds

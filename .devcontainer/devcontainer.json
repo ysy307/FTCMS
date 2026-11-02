@@ -13,6 +13,7 @@
     ],
     "runArgs": [
         "--hostname=ftcms-dev",
+        "--shm-size=4g",
         "--privileged",
         "--cap-add=SYS_ADMIN",
         "--cap-add=SYS_PTRACE",

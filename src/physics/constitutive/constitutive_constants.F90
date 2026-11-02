@@ -37,6 +37,15 @@ module constitutive_constants
     !> Water critical point density [kg/m^3]
     real(real64), parameter, public :: water_critical_point_density = 322.0d0
 
+    !> Lowest temperature [K] at which the bundled IAPWS-97 implementation
+    !> still resolves a liquid (Region 1) state instead of reporting the
+    !> region as invalid; see get_region_iapws97 in
+    !> third_party/IAPWS/src/iapws97/iapws97_base.F90. This is the actual
+    !> validity floor of the library's Region 1 branch, well below the
+    !> triple point, and covers the supercooled liquid water that persists
+    !> in unfrozen pore films below 0 degC.
+    real(real64), parameter, public :: iapws97_liquid_min_temperature = 243.15d0
+
     !> Latent heat of fusion for water at 0 degC [J/kg]
     real(real64), parameter, public :: latent_heat_fusion_water_0C = 334560.0d0
     !> Water freezing point at standard atmospheric pressure [degC]

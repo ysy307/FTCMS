@@ -15,6 +15,20 @@
 !> conductivity is refused here rather than floored, because a floor would turn
 !> an impermeable subdomain into a slightly permeable one without saying so.
 !>
+!> An unsaturated material splits that conductivity into a saturated tensor and
+!> a scalar relative conductivity of the pressure,
+!>
+!> \[
+!>   \mathbf K_h(p)=k_r(p)\,\mathbf K_{h,\mathrm{sat}},\qquad
+!>   \mathbf\Lambda^{-1}(p)=\frac{\mathbf\Lambda_{\mathrm{sat}}^{-1}}{k_r(p)},
+!> \]
+!>
+!> so only the tensor is inverted, once per cell, and the state dependence stays
+!> a positive scalar. A positive \(k_r\) times a symmetric positive definite
+!> tensor is symmetric positive definite, which is what keeps the mobility
+!> admissible at every iterate. The curve itself is the repository's own
+!> hydraulic conductivity function; see `app_mixed_hydraulic_closure`.
+!>
 !> The unknowns PETSc stores are dimensionless. A flux scale in m/s and a
 !> pressure scale in Pa carry the physical size of the problem, which is what
 !> keeps a conductivity of \(10^{-20}\) m/s and a pressure of \(10^{4}\) Pa in
@@ -23,6 +37,7 @@
 module app_mixed_hydraulic_physics
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use :: petscsys
+    use :: module_core, only:type_config_wrf, type_config_hcf
     implicit none
     private
 
@@ -35,8 +50,11 @@ module app_mixed_hydraulic_physics
     public :: C_DENSITY, C_GRAVITY_X, C_GRAVITY_Z
     public :: MIXED_AUX_FIELDS
     public :: A_INVERSE_MOBILITY, A_STORAGE, A_SOURCE, A_PRESSURE_OLD, A_BC_PRESSURE
+    public :: A_MATERIAL
     public :: MIXED_FIELD_FLUX, MIXED_FIELD_PRESSURE
     public :: MIXED_DIMENSION
+    public :: MIXED_STORAGE_LINEAR, MIXED_STORAGE_RETENTION
+    public :: MIXED_CONDUCTIVITY_FIXED, MIXED_CONDUCTIVITY_HCF
 
     !> Field numbers of the isothermal proof of concept, PETSc's zero-based
     !> numbering. A coupled run adds temperature ahead of these, so nothing
@@ -61,23 +79,75 @@ module app_mixed_hydraulic_physics
 
     ! Auxiliary fields, cell-wise. The order fixes the offsets PETSc hands the
     ! kernels, so it matches the order the fields are added to the auxiliary DM.
-    integer(int32), parameter :: A_INVERSE_MOBILITY = 1 !< \(\mathbf\Lambda^{-1}\), row-major, Pa s/m2.
-    integer(int32), parameter :: A_STORAGE = 2          !< \(\partial W/\partial p\), 1/Pa.
+    !> \(\mathbf\Lambda_{\mathrm{sat}}^{-1}\), row-major, Pa s/m2.
+    !>
+    !> The saturated inverse mobility, inverted once per cell from that cell's
+    !> own tensor. A kernel divides it by the relative conductivity of the
+    !> current pressure, so nothing inverts a state-dependent tensor and nothing
+    !> inverts an average of two materials.
+    integer(int32), parameter :: A_INVERSE_MOBILITY = 1
+    !> Whether the cell's storage law can store water at all, in 1/Pa.
+    !>
+    !> A magnitude of the law rather than a value of \(\partial W/\partial p\)
+    !> at one state: it is written once, at setup, and it is zero exactly when
+    !> the cell is steady. The pressure gauge reads it to decide whether the
+    !> constant pressure is really in the operator's kernel, and a curve whose
+    !> tangent happens to vanish at the accepted state still stores water at the
+    !> next one. No kernel reads it; the residual and its tangent both go
+    !> through the storage closure.
+    integer(int32), parameter :: A_STORAGE = 2
     integer(int32), parameter :: A_SOURCE = 3           !< Volumetric source, 1/s.
     integer(int32), parameter :: A_PRESSURE_OLD = 4     !< Accepted cell pressure, Pa.
     integer(int32), parameter :: A_BC_PRESSURE = 5      !< Prescribed boundary pressure, Pa.
-    integer(int32), parameter :: MIXED_AUX_FIELDS = 5
+    !> The cell's slot in the storage-law table, one-based, as a whole number.
+    !>
+    !> A pointwise function receives no context pointer, so this is how a kernel
+    !> reaches the law of the cell it is running on.
+    integer(int32), parameter :: A_MATERIAL = 6
+    integer(int32), parameter :: MIXED_AUX_FIELDS = 6
+
+    !> A constant capacity: \(W=Cp\), so \(\partial W/\partial p=C\).
+    integer(int32), parameter :: MIXED_STORAGE_LINEAR = 1
+    !> The repository's retention curve plus its saturated compressive storage.
+    integer(int32), parameter :: MIXED_STORAGE_RETENTION = 2
+
+    !> \(k_r\equiv1\): the conductivity tensor is the whole law.
+    integer(int32), parameter :: MIXED_CONDUCTIVITY_FIXED = 1
+    !> The repository's hydraulic conductivity function supplies \(k_r(p)\).
+    integer(int32), parameter :: MIXED_CONDUCTIVITY_HCF = 2
 
     !> One material's hydraulic response, constant over its cells.
     type :: type_mixed_material
         !> The "Cell Sets" value this material is written on.
         integer(int32) :: id = 0
-        !> Hydraulic conductivity \(\mathbf K_h\) in m/s, symmetric positive definite.
+        !> Saturated conductivity \(\mathbf K_{h,\mathrm{sat}}\), m/s, symmetric positive definite.
         real(real64) :: conductivity(MIXED_DIMENSION, MIXED_DIMENSION) = 0.0_real64
         !> Linear storage \(\partial W/\partial p\) in 1/Pa; zero makes the cell steady.
         real(real64) :: storage = 0.0_real64
         !> Volumetric source in 1/s.
         real(real64) :: source = 0.0_real64
+        !> MIXED_STORAGE_LINEAR or MIXED_STORAGE_RETENTION.
+        integer(int32) :: storage_law = MIXED_STORAGE_LINEAR
+        !> Retention parameters, read for MIXED_STORAGE_RETENTION.
+        type(type_config_wrf) :: retention
+        !> Specific storage \(S_s\) of the saturated branch, 1/m.
+        real(real64) :: specific_storage = 0.0_real64
+        !> Pressure at which the pore volume fills, Pa.
+        !>
+        !> The value the closure's own `calc_saturation_pressure` returns for
+        !> this material's state. In the isothermal unfrozen case with
+        !> \(\theta_s\) equal to the porosity that is zero, because every
+        !> retention curve here is saturated exactly at a non-negative head.
+        real(real64) :: saturation_pressure = 0.0_real64
+        !> MIXED_CONDUCTIVITY_FIXED or MIXED_CONDUCTIVITY_HCF.
+        integer(int32) :: conductivity_law = MIXED_CONDUCTIVITY_FIXED
+        !> The conductivity function, read for MIXED_CONDUCTIVITY_HCF.
+        !>
+        !> Its `k_sat` sets the scale of the model's own output only; the
+        !> saturated conductivity of the cell is the tensor above, and the
+        !> relative conductivity is this model normalised by its own saturated
+        !> value. A material may therefore be anisotropic while its curve is not.
+        type(type_config_hcf) :: conductivity_function
     end type type_mixed_material
 
 contains

@@ -31,6 +31,7 @@ module physics_governing_thermal
         integer(int32) :: enthalpy_cache_num_hist = 0
     contains
         procedure, pass(self), public :: initialize => initialize_type_thermal
+        procedure, pass(self), public :: initialize_from_configs => initialize_type_thermal_from_configs
         procedure, pass(self), public :: destroy => destroy_type_thermal
 
         procedure, pass(self), public :: assemble_local => assemble_local_thermal
@@ -252,6 +253,52 @@ module physics_governing_thermal
             integer(int32), intent(in) :: active_region_ids(:)
 
         end subroutine initialize_type_thermal
+
+        !> Build the model from constitutive configurations rather than a project.
+        !>
+        !> The construction `initialize_type_thermal` performs once it has
+        !> translated a `type_input`, exposed so that a caller holding the
+        !> configurations directly -- a driver with no project directory -- reaches
+        !> the same model through the same code. No default is invented for
+        !> anything the project would otherwise supply.
+        !>
+        !> Assumes one configuration entry per active region, in the order of
+        !> `active_region_ids`. Costs one constitutive-model construction per
+        !> material and \(O(1)\) further memory.
+        !>
+        !> Fails by `error stop` when the configuration arrays and the region list
+        !> have different lengths.
+        module subroutine initialize_type_thermal_from_configs(self, active_region_ids, &
+                                                               configs_density, configs_specific_heat, &
+                                                               configs_heat_capacity, configs_thermal_conductivity, &
+                                                               configs_wrf, configs_hcf, configs_gcc, &
+                                                               computation_type, computation_dimension, &
+                                                               enable_vapor_transport)
+            implicit none
+            class(type_thermal), intent(inout) :: self
+            !> Region identifiers the material laws belong to, one per configuration.
+            integer(int32), intent(in) :: active_region_ids(:)
+            !> Phase densities of each region.
+            type(type_config_constitutive), intent(in) :: configs_density(:)
+            !> Phase specific heats of each region.
+            type(type_config_constitutive), intent(in) :: configs_specific_heat(:)
+            !> Volumetric heat capacities of each region.
+            type(type_config_constitutive), intent(in) :: configs_heat_capacity(:)
+            !> Phase thermal conductivities of each region.
+            type(type_config_constitutive), intent(in) :: configs_thermal_conductivity(:)
+            !> Retention curve of each region.
+            type(type_config_wrf), intent(in) :: configs_wrf(:)
+            !> Hydraulic conductivity function of each region.
+            type(type_config_hcf), intent(in) :: configs_hcf(:)
+            !> Freezing curve of each region.
+            type(type_config_gcc), intent(in) :: configs_gcc(:)
+            !> Computation type the coefficient tensors are laid out for.
+            integer(int32), intent(in) :: computation_type
+            !> Computation dimension of those tensors.
+            integer(int32), intent(in) :: computation_dimension
+            !> Whether the vapour terms take part in storage and transport.
+            logical, intent(in) :: enable_vapor_transport
+        end subroutine initialize_type_thermal_from_configs
 
         module subroutine destroy_type_thermal(self)
             implicit none

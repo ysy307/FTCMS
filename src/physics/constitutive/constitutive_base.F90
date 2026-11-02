@@ -11,7 +11,8 @@ module physics_constitutive_base
         min_vapor_density, &
         reference_water_density, &
         water_triple_point_temperature, &
-        water_critical_point_temperature
+        water_critical_point_temperature, &
+        iapws97_liquid_min_temperature
     implicit none
     private
 
@@ -92,7 +93,7 @@ contains
 
         is_valid_iapws97_liquid_state = .false.
         if (.not. ieee_is_finite(T_K) .or. .not. ieee_is_finite(P_abs)) return
-        if (T_K < water_triple_point_temperature) return
+        if (T_K < iapws97_liquid_min_temperature) return
         if (T_K > water_critical_point_temperature) return
         if (P_abs < 1.0d3) return
         if (P_abs > 1.0d8) return
@@ -259,7 +260,10 @@ contains
     !> - Uses IAPWS-97 formulation
     !>
     !> Assumptions:
-    !> - Limits calculation to temperatures above freezing point
+    !> - IAPWS-97 also governs the supercooled liquid down to
+    !>   iapws97_liquid_min_temperature (243.15 K), covering the unfrozen
+    !>   water that persists in pore films below 0 degC; only outside that
+    !>   range does the model fall back to a fixed reference value.
     !>
     !> Numerical guarantee:
     !> - Defined by IAPWS-97 standard
@@ -284,10 +288,6 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        if (T_K < 273.15d0) then
-            density = reference_water_density
-            return
-        end if
         if (.not. is_valid_iapws97_liquid_state(T_K, P_abs)) then
             density = reference_water_density
             return
@@ -301,7 +301,9 @@ contains
     !> - \(\frac{\partial \rho}{\partial T}\)
     !>
     !> Assumptions:
-    !> - Limits calculation to temperatures above freezing point
+    !> - IAPWS-97 also governs the supercooled liquid down to
+    !>   iapws97_liquid_min_temperature (243.15 K); only outside that range
+    !>   does the model fall back to a fixed (zero) tangent.
     !>
     !> Numerical guarantee:
     !> - Defined by IAPWS-97 standard
@@ -326,10 +328,6 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        if (T_K < 273.15d0) then
-            deriv_density = 0.0d0
-            return
-        end if
         if (.not. is_valid_iapws97_liquid_state(T_K, P_abs)) then
             deriv_density = 0.0d0
             return
@@ -343,7 +341,9 @@ contains
     !> - \(\frac{\partial \rho}{\partial P}\)
     !>
     !> Assumptions:
-    !> - Limits calculation to temperatures above freezing point
+    !> - IAPWS-97 also governs the supercooled liquid down to
+    !>   iapws97_liquid_min_temperature (243.15 K); only outside that range
+    !>   does the model fall back to a fixed (zero) tangent.
     !>
     !> Numerical guarantee:
     !> - Defined by IAPWS-97 standard
@@ -368,10 +368,6 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        if (T_K < 273.15d0) then
-            deriv_density = 0.0d0
-            return
-        end if
         if (.not. is_valid_iapws97_liquid_state(T_K, P_abs)) then
             deriv_density = 0.0d0
             return
@@ -385,7 +381,9 @@ contains
     !> - Uses IAPWS-97 formulation
     !>
     !> Assumptions:
-    !> - Limits calculation to temperatures above freezing point
+    !> - IAPWS-97 also governs the supercooled liquid down to
+    !>   iapws97_liquid_min_temperature (243.15 K); only outside that range
+    !>   does the model fall back to a fixed reference value.
     !>
     !> Numerical guarantee:
     !> - Defined by IAPWS-97 standard
@@ -410,10 +408,6 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        if (T_K < 273.15d0) then
-            cp = 4181.3d0
-            return
-        end if
         if (.not. is_valid_iapws97_liquid_state(T_K, P_abs)) then
             cp = 4181.3d0
             return

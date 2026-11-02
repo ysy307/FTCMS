@@ -117,16 +117,15 @@ contains
             return
         end if
 
-        if (temperature <= Tf0) then
-            if (.not. ieee_is_finite(temperature_K) .or. temperature_K <= 1.0d0) then
-                temperature_ratio = 1.0d0 / Tf0_K
-            else
-                temperature_ratio = temperature_K / Tf0_K
-            end if
-            suction = -lf * rho_water * log(temperature_ratio)
+        ! Keep the signed equilibrium suction above melting. The phase split
+        ! selects the binding matric/freezing potential itself; clipping here
+        ! makes its smooth maximum create ice in warm, nearly saturated soil.
+        if (.not. ieee_is_finite(temperature_K) .or. temperature_K <= 1.0d0) then
+            temperature_ratio = 1.0d0 / Tf0_K
         else
-            suction = 0.0d0
+            temperature_ratio = temperature_K / Tf0_K
         end if
+        suction = -lf * rho_water * log(temperature_ratio)
     end subroutine calc_gcc_nonseg
 
     module subroutine deriv_temp_gcc_nonseg(self, state, suction_derivative)
@@ -149,16 +148,12 @@ contains
             return
         end if
 
-        if (temperature <= Tf0) then
-            if (.not. ieee_is_finite(temperature_K) .or. temperature_K <= 1.0d0) then
-                temperature_safe = 1.0d0
-            else
-                temperature_safe = temperature_K
-            end if
-            suction_derivative = -lf * rho_water / temperature_safe
+        if (.not. ieee_is_finite(temperature_K) .or. temperature_K <= 1.0d0) then
+            temperature_safe = 1.0d0
         else
-            suction_derivative = 0.0d0
+            temperature_safe = temperature_K
         end if
+        suction_derivative = -lf * rho_water / temperature_safe
     end subroutine deriv_temp_gcc_nonseg
 
     module subroutine deriv_pres_gcc_nonseg(self, state, suction_derivative)
@@ -190,16 +185,12 @@ contains
             return
         end if
 
-        if (temperature <= Tf0) then
-            if (.not. ieee_is_finite(temperature_K) .or. temperature_K <= 1.0d0) then
-                temperature_safe = 1.0d0
-            else
-                temperature_safe = temperature_K
-            end if
-            suction_derivative = lf * rho_water / (temperature_safe * temperature_safe)
+        if (.not. ieee_is_finite(temperature_K) .or. temperature_K <= 1.0d0) then
+            temperature_safe = 1.0d0
         else
-            suction_derivative = 0.0d0
+            temperature_safe = temperature_K
         end if
+        suction_derivative = lf * rho_water / (temperature_safe * temperature_safe)
     end subroutine deriv2_temp_gcc_nonseg
 
     module subroutine deriv_pressure_ice_water_nonseg(self, state, deriv)

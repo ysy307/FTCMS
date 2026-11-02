@@ -70,15 +70,57 @@ contains
             call input_translator%execute(input, material_idx, gcc_model_info(j))
         end do
 
-        call self%physics%initialize(active_region_ids, density_info, &
-                                     specific_heat_info, heat_capacity_info, thermal_conductivity_info, &
-                                     wrf_model_info, hcf_model_info, gcc_model_info)
-
-        self%computation_type = input%basic%simulation_settings%calculate_type
-        self%computation_dimension = input%basic%simulation_settings%calculate_dimension
-        self%enable_vapor_transport = input%basic%analysis_controls%enable_vapor_transport
+        call self%initialize_from_configs(active_region_ids, density_info, &
+                                          specific_heat_info, heat_capacity_info, thermal_conductivity_info, &
+                                          wrf_model_info, hcf_model_info, gcc_model_info, &
+                                          input%basic%simulation_settings%calculate_type, &
+                                          input%basic%simulation_settings%calculate_dimension, &
+                                          input%basic%analysis_controls%enable_vapor_transport)
 
     end subroutine initialize_type_thermal
+
+    module subroutine initialize_type_thermal_from_configs(self, active_region_ids, &
+                                                           configs_density, configs_specific_heat, &
+                                                           configs_heat_capacity, configs_thermal_conductivity, &
+                                                           configs_wrf, configs_hcf, configs_gcc, &
+                                                           computation_type, computation_dimension, &
+                                                           enable_vapor_transport)
+        implicit none
+        class(type_thermal), intent(inout) :: self
+        integer(int32), intent(in) :: active_region_ids(:)
+        type(type_config_constitutive), intent(in) :: configs_density(:)
+        type(type_config_constitutive), intent(in) :: configs_specific_heat(:)
+        type(type_config_constitutive), intent(in) :: configs_heat_capacity(:)
+        type(type_config_constitutive), intent(in) :: configs_thermal_conductivity(:)
+        type(type_config_wrf), intent(in) :: configs_wrf(:)
+        type(type_config_hcf), intent(in) :: configs_hcf(:)
+        type(type_config_gcc), intent(in) :: configs_gcc(:)
+        integer(int32), intent(in) :: computation_type
+        integer(int32), intent(in) :: computation_dimension
+        logical, intent(in) :: enable_vapor_transport
+
+        integer(int32) :: num_active_materials
+
+        num_active_materials = size(active_region_ids)
+        if (size(configs_density) /= num_active_materials .or. &
+            size(configs_specific_heat) /= num_active_materials .or. &
+            size(configs_heat_capacity) /= num_active_materials .or. &
+            size(configs_thermal_conductivity) /= num_active_materials .or. &
+            size(configs_wrf) /= num_active_materials .or. &
+            size(configs_hcf) /= num_active_materials .or. &
+            size(configs_gcc) /= num_active_materials) then
+            error stop "initialize_type_thermal_from_configs: one configuration per active region is required"
+        end if
+
+        call self%physics%initialize(active_region_ids, configs_density, &
+                                     configs_specific_heat, configs_heat_capacity, configs_thermal_conductivity, &
+                                     configs_wrf, configs_hcf, configs_gcc)
+
+        self%computation_type = computation_type
+        self%computation_dimension = computation_dimension
+        self%enable_vapor_transport = enable_vapor_transport
+
+    end subroutine initialize_type_thermal_from_configs
 
     module subroutine destroy_type_thermal(self)
         implicit none

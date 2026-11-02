@@ -26,6 +26,15 @@ module app_mixed_hydraulic
     implicit none
     private
 
+    !> Returned before solving when steady prescribed fluxes and sources do not balance.
+    integer(int32), parameter, public :: MIXED_ERR_INCOMPATIBLE = 1001
+    !> Returned when the requested step length is not a positive finite number.
+    integer(int32), parameter, public :: MIXED_ERR_INVALID_STEP = 1002
+    !> Returned when a converged solve came back with a nonfinite entry.
+    integer(int32), parameter, public :: MIXED_ERR_NONFINITE = 1003
+    !> Returned when a cell's conductivity model supplied no usable mobility.
+    integer(int32), parameter, public :: MIXED_ERR_MOBILITY = 1004
+
     public :: type_mixed_hydraulic
     public :: type_mixed_audit
     public :: MIXED_BC_PRESSURE, MIXED_BC_FLUX
@@ -90,6 +99,14 @@ module app_mixed_hydraulic
         Vec :: local_solution
         !> Cell-wise coefficients: inverse mobility, storage, source, history.
         Vec :: auxiliary
+        !> The auxiliary data of the accepted state, as a rejected step found it.
+        !>
+        !> A trial overwrites the storage history in place, and what it
+        !> overwrites is not recoverable from the accepted solution: after a
+        !> step is accepted the history still describes the start of that step,
+        !> which is what makes the accepted step auditable. So the bytes are
+        !> kept rather than recomputed.
+        Vec :: accepted_auxiliary
         !> One auxiliary vector per prescribed-pressure boundary.
         Vec :: boundary_aux(MAX_MIXED_BOUNDARIES)
         !> The nonlinear solver. It takes its residual, Jacobian and matrix from
@@ -117,6 +134,12 @@ module app_mixed_hydraulic
         real(real64) :: gravity(MIXED_DIMENSION) = 0.0_real64
         !> The step the current residual differences over, s.
         real(real64) :: dt = 1.0_real64
+        !> The step of the last accepted state, s; what a rejected step restores.
+        real(real64) :: accepted_dt = 1.0_real64
+        !> True after installation of the steady, all-flux mean-pressure constraint.
+        logical :: pressure_gauged = .false.
+        !> True while this solver holds the storage-law table.
+        logical :: laws_installed = .false.
         logical :: ready = .false.
     contains
         ! ---- Lifecycle ----
@@ -159,8 +182,10 @@ module app_mixed_hydraulic
         !> the coefficients and whatever PETSc's section construction costs.
         !>
         !> Fails by `error stop` with the refusing condition named: a mesh of the
-        !> wrong dimension, a cell without a material, or a conductivity that is
-        !> not positive definite. A zero conductivity is refused, never floored.
+        !> wrong dimension, a cell without a material, a conductivity that is
+        !> not positive definite, or a conductivity function in a mode this
+        !> isothermal path cannot evaluate or with no positive saturated value.
+        !> A zero conductivity is refused, never floored.
         module subroutine initialize_mixed_hydraulic(self, dm, ierr)
             implicit none
             class(type_mixed_hydraulic), intent(inout), target :: self
@@ -179,17 +204,36 @@ module app_mixed_hydraulic
         !> Solve one backward-Euler step of length `dt` seconds.
         !>
         !> \[
-        !>   \int_K\frac{W^{n+1}-W^{n}}{\Delta t}+\int_K\nabla\cdot\mathbf q_l^{n+1}
+        !>   \int_K\frac{W(p^{n+1})-W(p^{n})}{\Delta t}+\int_K\nabla\cdot\mathbf q_l^{n+1}
         !>   =\int_K s.
         !> \]
         !>
-        !> Assumes the accepted history is the state of the previous successful
-        !> call. Guarantees that the history is advanced only when SNES converged;
-        !> `accepted = .false.` leaves it exactly as it was, so a rejected step
-        !> can be retried at a different length. Cost is one nonlinear solve.
+        !> The storage term differences the stored quantity itself; the Jacobian
+        !> carries \(\partial W/\partial p\) at the current iterate. Both come
+        !> from the same closure, so the matrix is the derivative of the
+        !> residual and not of a capacity-times-increment stand-in for it.
         !>
-        !> Fails by returning `accepted = .false.` with the PETSc error in `ierr`
-        !> when the solve did not converge.
+        !> Assumes the accepted history is the state of the previous successful
+        !> call. Guarantees that the history is advanced only when the solve
+        !> converged to a finite state; on every other path the trial solution,
+        !> the accepted solution, the accepted storage history and the accepted
+        !> step length are restored exactly, so the same state can be retried at
+        !> a shorter length. Cost is one nonlinear solve.
+        !>
+        !> Fails by returning `accepted = .false.` with `ierr` set: the PETSc
+        !> error when the solve itself failed, zero when SNES merely reported a
+        !> diverged reason, `MIXED_ERR_INVALID_STEP` for a step that is not
+        !> positive and finite, `MIXED_ERR_NONFINITE` for a converged but
+        !> nonfinite state, `MIXED_ERR_MOBILITY` when a cell's conductivity
+        !> model supplied no usable mobility at some iterate -- which takes
+        !> precedence over the error it caused, and is reduced over the
+        !> communicator so that every rank reports the same reason -- and
+        !> `MIXED_ERR_INCOMPATIBLE` when a steady all-flux
+        !> problem's prescribed flux and integrated source disagree. For a
+        !> connected steady all-flux domain, fixes the volume-weighted mean
+        !> pressure to zero; a cell that stores water excludes that gauge. Only
+        !> one gauged solver may be live; disconnected domains require separate
+        !> component gauges and are not supported.
         module subroutine solve_step(self, time, dt, accepted, ierr)
             implicit none
             class(type_mixed_hydraulic), intent(inout) :: self
@@ -205,14 +249,18 @@ module app_mixed_hydraulic
         !> The backward-Euler water balance of each owned cell.
         !>
         !> \[
-        !>   d_K=\int_K(W^{n+1}-W^{n})+\Delta t\sum_{f\subset\partial K}Q_{Kf}
+        !>   d_K=\int_K(W(p^{n+1})-W(p^{n}))+\Delta t\sum_{f\subset\partial K}Q_{Kf}
         !>   -\Delta t\int_K s.
         !> \]
         !>
         !> Assumes the solution vector holds the state the balance is claimed
         !> for. The facet fluxes are reconstructed from the degrees of freedom
         !> rather than read out of the assembled residual, so this is an
-        !> independent measurement. Cost is \(O(N)\) in owned cells.
+        !> independent measurement. \(W\) is the same closure the residual
+        !> differences, evaluated at the same accepted pressure, which stays
+        !> readable after a step is accepted because the accepted history is a
+        !> field of its own rather than the accepted solution vector. Cost is
+        !> \(O(N)\) in owned cells.
         !>
         !> Fails by returning the first PETSc error; all outputs are initialised
         !> on every path. `cell_defect` beyond the owned-cell count is zeroed.

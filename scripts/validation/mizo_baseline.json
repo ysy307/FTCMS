@@ -1,7 +1,14 @@
 {
   "description": "Mizoguchi freezing-column reference. Regression baseline for the THV reformulation stages.",
+  "reference_kind": "regression baseline: a previous run of this code, NOT experimental data. The measured profiles are the separate EXPERIMENTAL_DATA table in Mizo_theta.py, whose provenance is unverified.",
   "source_run": "project/Mizo-xz-Convex/Output_archive_20260818_qgate_theta0330",
-  "source_note": "50 h complete run at the initial condition the repository's Input/Conditions.json actually carries (uniform pressure -54065.7412 Pa, theta=0.330). The ic345 archive (theta=0.345) is a DIFFERENT initial condition and must not be used as the baseline unless Conditions.json is changed to match. Regenerate with: python3 scripts/validation/Mizo_theta.py --vtu_dir <dir>/Files --time <h> --json_output <file>",
+  "initial_condition": {
+    "initial_pressure_Pa": -54065.7412,
+    "initial_temperature_C": 6.7,
+    "theta_total_initial": 0.33
+  },
+  "source_note": "50 h complete run at uniform initial pressure -54065.7412 Pa (theta=0.330). WARNING: the repository's project/Mizo-xz-Convex/Input/Conditions.json no longer carries that initial condition; commit b617a2b90 changed it to -44683.6901 Pa (theta=0.345), whose like-for-like archive is Output_archive_20260818_ic345_theta0345. A fresh run of the current input compared against this baseline reports an initial-condition difference, not a code regression: measured on 2026-09-17, the ic345 archive differs from these numbers by up to +0.30 in upper gain / experiment and +0.015 in bias. Either compare a theta=0.330 run against this record, or regenerate the baseline from a theta=0.345 run and say so here. Regenerate with: .venv/bin/python scripts/validation/Mizo_theta.py --vtu_dir <dir>/Files --snapshot_format vtu --time <h> --json_output <file>",
+  "verification": "2026-09-17: every metric below re-derived from the archived VTU with the restored VTU reader and reproduced to the printed precision (mizo_compare.py delta +0 at 12/24/50 h). Log: log/claude-mizo-next-20260917/compare_qgate_theta0330.log",
   "times": {
     "12h": {
       "time_hours": 12,

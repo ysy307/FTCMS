@@ -331,7 +331,10 @@ contains
         type(type_iapws06), target :: ice
         type(type_state) :: state
         real(real64) :: dwater_dP, dwater_dT, dwater_dT_cryo
-        real(real64) :: cryogenic_suction, effective_suction
+        real(real64) :: cryogenic_suction, effective_suction, ice_content
+        real(real64) :: theta_total, theta_liquid, theta_ice
+        real(real64) :: d_effective_dP, d_effective_dT, d_cryo_dT, freezing_level_set
+        integer(int32) :: i
 
         call self%configure_wrf(wrf_config, SWCC_MODELS%VG%ID)
         wrf_config%theta_s = 0.535d0
@@ -355,7 +358,7 @@ contains
         ! subject to two constraints and satisfies the stronger one. Their sum
         ! measures how far the state is from equilibrium, which is not a
         ! transport potential. Deep in the frozen zone (here s_f is two orders
-        ! above s_m) the smoothing has compact support, so the max is exact.
+        ! above s_m) the max selects s_f exactly.
         call state%temperature%set(-1.0d0)
         call state%pressure%set(-1.0d5)
         call gcc%p%calc(state, cryogenic_suction)
@@ -382,6 +385,53 @@ contains
         call fusion%calc_water_content_derivatives(state, dwater_dP, dwater_dT)
         call self%check_true("unfrozen liquid storage retains its pore-pressure derivative", dwater_dP > 0.0d0)
         call self%check_close("unfrozen liquid storage has no freezing-curve slope", dwater_dT, 0.0d0, 1.0d-14)
+
+        ! A warm, nearly saturated soil holds no ice. The generalized-Clapeyron
+        ! suction is SIGNED above melting: ice is stable only where the liquid
+        ! pressure is below p_i, and at +6.7 C that would take -8 MPa, so the
+        ! max selects the matric branch by a margin of six orders of
+        ! magnitude. Clipping s_f to zero there instead lets it tie or beat a
+        ! small pore pressure, and the max returns a POSITIVE effective
+        ! suction at a positive pore pressure: the retention curve of this soil then reports a liquid
+        ! content below theta_s and the complement becomes ice. Measured on the
+        ! clipped closure at this state: theta_i = 1.2e-2, in soil seven degrees
+        ! above freezing.
+        call state%temperature%set(6.7d0)
+        call state%pressure%set(2.0d3)
+        call gcc%p%calc(state, cryogenic_suction)
+        call self%check_true("freezing suction is signed above melting", cryogenic_suction < -1.0d6)
+        ! calc_effective_suction clamps the matric term at zero, so above
+        ! saturation it publishes zero rather than the negative suction
+        ! calc_phase_split works with; either way the freezing branch is not
+        ! selected, which is what this measures.
+        call fusion%calc_effective_suction(state, effective_suction)
+        call self%check_close("warm saturated suction is not the freezing one", effective_suction, 0.0d0, 1.0d-12)
+        call fusion%calc_ice_content(state, ice_content)
+        call self%check_close("warm saturated soil carries no ice", ice_content, 0.0d0, 0.0d0)
+
+        ! At the capillary/freezing crossing, the compact C1 maximum gives
+        ! equal weights to both branches. This is the point where the exact
+        ! maximum has a discontinuous tangent.
+        call state%temperature%set(-0.1d0)
+        do i = 1, 4
+            call gcc%p%calc(state, cryogenic_suction)
+            call state%pressure%set(-cryogenic_suction)
+        end do
+        call gcc%p%calc(state, cryogenic_suction)
+        call gcc%p%deriv_temperature(state, d_cryo_dT)
+        call fusion%calc_phase_split(state, theta_total, theta_liquid, theta_ice, &
+                                     suction_effective_out=effective_suction, &
+                                     dsuction_eff_dP_out=d_effective_dP, &
+                                     dsuction_eff_dT_out=d_effective_dT)
+        call self%check_true("C1 maximum rounds the suction value at the crossing", &
+                             effective_suction > cryogenic_suction)
+        call self%check_close("C1 maximum shares the pressure tangent at the crossing", &
+                              d_effective_dP, -0.5d0, 1.0d-12)
+        call self%check_close("C1 maximum shares the temperature tangent at the crossing", &
+                              d_effective_dT, 0.5d0 * d_cryo_dT, 1.0d-12)
+        call fusion%calc_freezing_level_set(state, freezing_level_set)
+        call self%check_true("C1 level set places the exact crossing inside the ice band", &
+                             freezing_level_set > 0.0d0)
     end subroutine test_freezing_storage_transport_split
 
     subroutine test_incomplete_beta_thread_safety(self)
@@ -586,30 +636,12 @@ contains
         ! r*Theta+(1-r)*theta_l=phi caps theta_w+theta_i AT the pore volume and
         ! makes the p-derivatives of theta_w and theta_i cancel, since neither
         ! phase can grow without the other shrinking once the pore is full.
-        ! The overfill bound is 1e-2, not machine precision: at this state
-        ! psi_cap=0, so the bisection's floor is psi_cryo_limited=0, and even
-        ! there the SAME smooth max the split uses (compute_effective_suction)
-        ! cannot bring the effective suction below ~SUCTION_SMOOTHING/2 (it is
-        ! sigma(0,0), not exactly 0) - a residual overfill of
-        ! (r-1)*(theta_s-theta_l(SUCTION_SMOOTHING/2)) remains (~3.8e-3 here).
-        ! Using the SAME smoothed potential as the split (rather than an
-        ! additive surrogate that would close this exactly but reopen the
-        ! storage/transport-potential mismatch Phase A's smooth max fixed) is
-        ! the point of wiring pore_excess through compute_effective_suction, so
-        ! this small, bounded residual is an accepted consequence, not a
-        ! defect: it is an order of magnitude below the ~3.4e-2 overfill the
-        ! unlimited split would produce at this state (raw psi_cryo, no cap).
-        call self%check_true("limited saturated state never overfills the pore beyond the smoothing scale", &
+        ! At psi_cap=0 the compact C1 maximum keeps a bounded residual because
+        ! its transition band lies above the limiter's zero-suction floor.
+        ! The residual is small relative to the unlimited overfill and vanishes
+        ! outside the regularization band.
+        call self%check_true("limited saturated state stays within the C1 pore tolerance", &
                              Qw + Qi <= porosity + 1.0d-2)
-        ! Since the C^1 pore-volume blend (compute_smooth_min composed through
-        ! compute_blended_effective_suction), the active constraint's
-        ! d(theta_w+theta_i)/dp=0 identity is no longer exact: the blend only
-        ! APPROACHES the hard limit's cancellation as the state moves deeper
-        ! into it, never reaching it (compute_smooth_min's weights saturate
-        ! asymptotically, see its docstring). At this state the observed
-        ! residual is ~1.8e-9; 1e-8 keeps headroom while still catching a
-        ! gross regression, where the old hard switch tested exact machine-
-        ! precision cancellation (1e-12).
         call self%check_true("limited-branch volumetric derivatives cancel: d(Qw+Qi)/dP = 0", &
                              abs(dQw_dP + dQi_dP) <= 1.0d-8)
         ! The two closures make different promises here, so the assertion has to
@@ -630,8 +662,8 @@ contains
                                  Qw + (rho_i_probe / rho_w_probe) * Qi < theta_predicted - 1.0d-6)
         else
             ! Suction-pinning closure: the split stays on the retention curve,
-            ! and the pore bound is only approached (see the smoothing note
-            ! above), never reached exactly.
+            ! and the pore bound is approached within the compact C1 band (see
+            ! the note above).
             call self%check_close("saturated frozen state closes the water-conservation identity", &
                                   Qw + (rho_i_probe / rho_w_probe) * Qi, theta_predicted, 1.0d-10)
         end if
@@ -650,16 +682,13 @@ contains
         call self%check_close("unsaturated phase volumes close the pore volume", Qw + Qi + Qa, 0.535d0, 2.0d-14)
     end subroutine test_saturation_pressure
 
-    !> Headline regression test for the hyperbolic-smoothing defect: at the
-    !> real case's warm, fully unfrozen initial condition (T=+6.7 degC,
-    !> p=-54066 Pa), s_m - s_f = 54066 Pa is nowhere near the SUCTION_SMOOTHING
-    !> band (~1.2e4 Pa), so the compact-support smooth max
-    !> (compute_effective_suction, fusion.F90) must return s_eff = s_m
-    !> EXACTLY - not merely to within a small tolerance. The old hyperbolic
-    !> smooth max has infinite tails (s_eff > max(s_m,s_f) at every finite
-    !> state), so it reported ice_content ~ 1e-3 by volume at every one of the
-    !> real mesh's 2874 nodes at this same state; with compact support the
-    !> ice-free branch is reached exactly once |s_m-s_f| >= SUCTION_SMOOTHING,
+    !> Headline regression test for the smoothing defect: at the real case's
+    !> warm, fully unfrozen initial condition (T=+6.7 degC, p=-54066 Pa),
+    !> s_m exceeds s_f by more than the compact C1 band, so
+    !> compute_effective_suction must return s_eff = s_m exactly. A hyperbolic
+    !> smooth maximum has infinite tails and reported ice_content ~ 1e-3 by
+    !> volume at every one of the real mesh's 2874 nodes at this same state.
+    !> Compact support reaches the ice-free branch exactly outside the band,
     !> so ice_content and its P,T tangents must be bitwise zero here.
     subroutine test_no_spurious_ice_at_warm_state(self)
         implicit none
@@ -705,35 +734,34 @@ contains
         call self%check_close("warm initial condition has zero dQi/dT", dQi_dT, 0.0d0, 0.0d0)
     end subroutine test_no_spurious_ice_at_warm_state
 
-    !> FD-vs-analytic acceptance sweep for the C^1 pore-volume blend
-    !> (compute_smooth_min composed through compute_blended_effective_suction,
-    !> fusion.F90): the whole point of replacing the is_limited if/else is
-    !> that a single chain rule must have consistent tangents on BOTH sides of
-    !> the old hard switch, not just far away from it. This sweep spans p from
+    !> FD-vs-analytic acceptance sweep across the pore-volume limit
+    !> (calc_limited_cryo_suction feeding
+    !> compute_pore_limited_effective_suction, fusion.F90): each branch must
+    !> report the tangent its own formula promises. This sweep spans p from
     !> deep-unfrozen (-30 kPa) up to 0 at T=-1 C, which crosses from
-    !> needs_blend=.false. (raw GCC tangents) into needs_blend=.true. (the
+    !> is_limited=.false. (raw GCC tangents) into is_limited=.true. (the
     !> active pore-volume root's IFT tangent) partway through - the porosity
     !> gap (theta_s=0.52 < porosity=0.535) is chosen so that crossing happens
     !> at a genuine interior root of pore_excess, not pinned at the psi=0
     !> floor (see test_saturation_pressure's theta_s=porosity config, which
-    !> deliberately hits that degenerate pinned case instead).
+    !> deliberately hits that degenerate pinned case instead). The crossing
+    !> itself is a kink: a central difference taken ACROSS it compares two
+    !> different branches and is not expected to match either one's tangent,
+    !> which is why the sweep samples the branches rather than the corner.
     !>
     !> Tolerance: relative error < 1e-4, OR absolute error below a small
     !> floor when the compared derivative itself is small. The floors are not
-    !> reverse-fitted to hide a defect: they cover one specific, understood,
-    !> pre-existing approximation carried over unchanged from the old
-    !> is_limited branch (which also never differentiated density_ratio) -
-    !> dE_dpsi/dE_dp in compute_blended_effective_suction hold r=rho_w/rho_i
-    !> fixed, but rho_i (IAPWS-06) is not pinned in T like rho_w is below
-    !> freezing (constitutive_base.F90's calc_rho_water), so the active
-    !> constraint's root psi* has a small residual T-sensitivity through r(T)
-    !> that this formulation does not carry. It is largest exactly where the
-    !> retained dsmin_da*dfreezing_dT term is smallest (deep in the blend),
-    !> which is where this sweep necessarily samples it. Measured peak
-    !> residuals with this configuration: ~4e-4 in dQw_dT, ~2.5e-6 in dQw_dP
-    !> (at s_m=0 exactly); the floors below keep roughly 2-3x headroom above
-    !> that, while a genuine reintroduced branch discontinuity would miss by
-    !> orders of magnitude more, which the relative-1e-4 leg still catches.
+    !> reverse-fitted to hide a defect: they cover one specific, understood
+    !> approximation - dE_dpsi/dE_dp in
+    !> compute_pore_limited_effective_suction hold r=rho_w/rho_i fixed, while
+    !> both rho_w (IAPWS-97, now evaluated below freezing too) and rho_i
+    !> (IAPWS-06) carry a temperature dependence, so the active constraint's
+    !> root psi* has a small residual T-sensitivity through r(T) that this
+    !> formulation does not carry. It is largest deep in the limited branch,
+    !> where dpsi_c_dT is exactly zero, which is where this sweep necessarily
+    !> samples it. The floors keep headroom above the measured residual while
+    !> a genuinely wrong branch tangent would miss by orders of magnitude
+    !> more, which the relative-1e-4 leg still catches.
     !> p_l = -s_eff is the Darcy driver; p_w labels the total water. Guards
     !> the exported d(s_eff)/dX on both branches, and that cooling a closed
     !> point leaves Theta and p_w untouched while p_l follows Clapeyron.

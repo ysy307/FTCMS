@@ -13,6 +13,7 @@ module core_interop_petscfe
     public :: petscfe_field_size
     public :: petscfe_evaluate_cell
     public :: petscfe_reference_coordinates
+    public :: petscfe_quadrature
 
     interface
         function ftcms_petscfe_tabulate(fe, num_points, points, values, gradients) &
@@ -53,6 +54,20 @@ module core_interop_petscfe
             real(c_double), intent(inout) :: divergence(*)
             integer(c_int) :: ierr
         end function ftcms_petscfe_evaluate_cell
+
+        function ftcms_petscfe_quadrature(dm, field, max_points, num_points, order, points, weights) &
+            bind(c, name="ftcms_petscfe_quadrature") result(ierr)
+            import :: c_int, c_double, c_ptr
+            implicit none
+            type(c_ptr), value :: dm
+            integer(c_int), value :: field
+            integer(c_int), value :: max_points
+            integer(c_int), intent(inout) :: num_points
+            integer(c_int), intent(inout) :: order
+            real(c_double), intent(inout) :: points(*)
+            real(c_double), intent(inout) :: weights(*)
+            integer(c_int) :: ierr
+        end function ftcms_petscfe_quadrature
 
         function ftcms_petscfe_reference_coordinates(dm, cell, num_points, points, ref_points) &
             bind(c, name="ftcms_petscfe_reference_coordinates") result(ierr)
@@ -121,6 +136,27 @@ contains
         ierr = ftcms_petscfe_evaluate_cell(dm, local_x, field, cell, int(size(ref_points, 2), c_int), &
                                            ref_points, values, divergence)
     end subroutine petscfe_evaluate_cell
+
+    !> The quadrature rule one field of a DM is integrated with.
+    !>
+    !> points is (dim, max_points) and weights is (max_points) on entry; the
+    !> first num_points entries of each are filled, the weights summing to the
+    !> reference cell's volume. The rule is read from the PetscFE the DS holds,
+    !> so it is the rule the element loop uses and not the degree it was asked
+    !> for. Fails with a PETSc size error when the rule has more points than the
+    !> arrays hold.
+    subroutine petscfe_quadrature(dm, field, points, weights, num_points, order, ierr)
+        implicit none
+        type(c_ptr), intent(in) :: dm
+        integer(c_int), intent(in) :: field
+        real(c_double), intent(inout), contiguous :: points(:, :)
+        real(c_double), intent(inout), contiguous :: weights(:)
+        integer(c_int), intent(inout) :: num_points
+        integer(c_int), intent(inout) :: order
+        integer(c_int), intent(inout) :: ierr
+
+        ierr = ftcms_petscfe_quadrature(dm, field, int(size(weights), c_int), num_points, order, points, weights)
+    end subroutine petscfe_quadrature
 
     !> Reference coordinates of physical points inside one affine cell.
     !>

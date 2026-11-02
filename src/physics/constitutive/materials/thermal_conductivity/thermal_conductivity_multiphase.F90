@@ -116,11 +116,21 @@ contains
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: lambda
 
+        integer(int32), parameter :: CAMPBELL_HANSSON_PARAMS = 6
         real(real64) :: phi1, phi2, phi3, phi4
+        logical :: has_campbell_hansson
 
         call self%get_phi(state, phi1, phi2, phi3, phi4)
 
-        if (phi4 > 0.0d0) then
+        ! The mixing rule is a property of the material, chosen by whether it
+        ! was configured with the Campbell-Hansson coefficients, and not of the
+        ! state: that correlation is fitted over the whole range up to a full
+        ! pore, so switching to the geometric mean when the gas fraction reaches
+        ! zero would make lambda jump at saturation and at a frozen full pore.
+        has_campbell_hansson = .false.
+        if (allocated(self%params)) has_campbell_hansson = (size(self%params) >= CAMPBELL_HANSSON_PARAMS)
+
+        if (has_campbell_hansson) then
             ! phi2 = liquid water, phi3 = ice. The gas-filled fraction phi4 is
             ! deliberately not passed: see calc_thc_4_vadoze.
             call calc_thc_4_vadoze(self%params(1), self%params(2), self%params(3), self%params(4), &

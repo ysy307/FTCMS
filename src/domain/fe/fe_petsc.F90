@@ -6,6 +6,12 @@
 !> the DMPlex closure, and PetscFE numbers its basis in that same closure order.
 !> There is therefore no node-ordering convention to reconcile: basis i belongs
 !> to node i for every element type and order, simplices included.
+!>
+!> One element object serves every cell of its type, and the assembly calls it
+!> from every OpenMP thread at once. PETSc's tabulation is not thread-safe -- it
+!> checks work arrays out of the element's DM -- so the basis at the element's
+!> own quadrature points is tabulated once, when the element is built, and read
+!> from then on; any other point goes to PETSc one thread at a time.
 module domain_fe_petsc
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use, intrinsic :: iso_c_binding, only: c_ptr, c_int, c_double
@@ -26,6 +32,14 @@ module domain_fe_petsc
         type(c_ptr) :: handle
         logical :: ready = .false.
         integer(int32) :: reference_dim = 0
+        !> Reference points the basis is cached at, the element's own quadrature
+        !> points, (reference_dim, number of points).
+        real(real64), allocatable :: cached_points(:, :)
+        !> Basis values at the cached points, (number of nodes, number of points).
+        real(real64), allocatable :: cached_values(:, :)
+        !> Reference gradients at the cached points,
+        !> (reference_dim, number of nodes, number of points).
+        real(real64), allocatable :: cached_gradients(:, :, :)
     contains
         procedure, pass(self) :: calc_measure => calc_measure_fe_petsc
         procedure, pass(self) :: is_inside => is_inside_fe_petsc
@@ -96,8 +110,51 @@ contains
                 if (ierr /= 0) error stop "PETSc element has no quadrature"
                 if (associated(rule)) call rule%adopt_quadrature(quadrature)
             end block
+
+            call cache_quadrature_basis(element)
         end select
     end function construct_fe_petsc
+
+    !> Tabulate the basis once at the element's own quadrature points.
+    !>
+    !> Called while the element is built, before any parallel region, so that
+    !> the assembly loops read the basis instead of asking PETSc for it.
+    subroutine cache_quadrature_basis(element)
+        implicit none
+        !> Element whose cache is filled; its quadrature rule must already be
+        !> adopted. The cache components are overwritten.
+        type(type_fe_petsc), intent(inout) :: element
+
+        type(type_coordinate_dp), pointer, contiguous :: gauss(:)
+        real(c_double), allocatable :: points(:, :), values(:, :), gradients(:, :, :)
+        integer(c_int) :: cerr
+        integer(int32) :: num_gauss, num_nodes, dim, p
+
+        nullify (gauss)
+        call element%get_num_gauss(num_gauss)
+        call element%get_gauss(gauss)
+        call element%get_num_nodes(num_nodes)
+        dim = element%reference_dim
+        if (.not. associated(gauss) .or. num_gauss < 1 .or. num_nodes < 1 .or. dim < 1) return
+
+        allocate (points(dim, num_gauss))
+        allocate (values(num_nodes, num_gauss))
+        allocate (gradients(dim, num_nodes, num_gauss))
+        do p = 1, num_gauss
+            points(1, p) = gauss(p)%x
+            if (dim >= 2) points(2, p) = gauss(p)%y
+            if (dim >= 3) points(3, p) = gauss(p)%z
+        end do
+        values = 0.0d0
+        gradients = 0.0d0
+        cerr = 0
+        call petscfe_tabulate(element%handle, points, values, gradients, cerr)
+        if (cerr /= 0) error stop "PETSc could not tabulate the element basis at its quadrature points"
+
+        call move_alloc(points, element%cached_points)
+        call move_alloc(values, element%cached_values)
+        call move_alloc(gradients, element%cached_gradients)
+    end subroutine cache_quadrature_basis
 
     !> Basis values and reference gradients of every node at one reference point.
     subroutine tabulate_fe_petsc(self, r, psi, dpsi_ref)
@@ -113,19 +170,44 @@ contains
         real(c_double) :: point(self%reference_dim, 1)
         real(c_double), allocatable :: values(:, :), gradients(:, :, :)
         integer(c_int) :: cerr
-        integer(int32) :: i, k, n
+        integer(int32) :: i, k, n, p
 
         call self%get_num_nodes(n)
         point(1, 1) = r%x
         if (self%reference_dim >= 2) point(2, 1) = r%y
         if (self%reference_dim >= 3) point(3, 1) = r%z
 
+        ! A quadrature point is read from the cache built with the element; the
+        ! points are the same numbers the rule hands out, so they match exactly.
+        if (allocated(self%cached_points)) then
+            do p = 1, size(self%cached_points, 2)
+                if (any(self%cached_points(:, p) /= point(:, 1))) cycle
+                if (present(psi)) then
+                    do i = 1, min(n, size(psi))
+                        psi(i) = self%cached_values(i, p)
+                    end do
+                end if
+                if (present(dpsi_ref)) then
+                    dpsi_ref = 0.0d0
+                    do i = 1, min(n, size(dpsi_ref, 2))
+                        do k = 1, min(self%reference_dim, size(dpsi_ref, 1))
+                            dpsi_ref(k, i) = self%cached_gradients(k, i, p)
+                        end do
+                    end do
+                end if
+                return
+            end do
+        end if
+
         allocate (values(n, 1))
         allocate (gradients(self%reference_dim, n, 1))
         values = 0.0d0
         gradients = 0.0d0
         cerr = 0
+        ! Any other point needs PETSc, which is not thread-safe.
+        !$omp critical (domain_fe_petsc_tabulate)
         call petscfe_tabulate(self%handle, point, values, gradients, cerr)
+        !$omp end critical (domain_fe_petsc_tabulate)
         if (cerr /= 0) error stop "PETSc could not tabulate the element basis"
 
         if (present(psi)) then

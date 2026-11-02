@@ -68,6 +68,46 @@ PetscErrorCode ftcms_petscfe_field_size(DM dm, PetscInt field, PetscInt *num_bas
 }
 
 /*
+ * The quadrature rule one field of a DM is integrated with.
+ *
+ * The rule is a property of the PetscFE the DS holds, not of the element loop,
+ * so an audit that wants to integrate the same thing the assembly integrates
+ * has to ask for it rather than assume the degree it was requested at.
+ *
+ *   points  : num_points * dim, point-major, on the reference cell
+ *   weights : num_points, summing to the reference cell's volume
+ *
+ * `max_points` is the caller's array capacity; a rule with more points than
+ * that is refused rather than truncated.
+ */
+PetscErrorCode ftcms_petscfe_quadrature(DM dm, PetscInt field, PetscInt max_points, PetscInt *num_points,
+                                        PetscInt *order, PetscReal points[], PetscReal weights[])
+{
+  PetscDS          ds;
+  PetscFE          fe;
+  PetscQuadrature  quadrature;
+  const PetscReal *q_points, *q_weights;
+  PetscInt         dim, Nc, Np, q_order;
+
+  PetscFunctionBegin;
+  *num_points = 0;
+  *order      = -1;
+  PetscCall(DMGetDS(dm, &ds));
+  PetscCall(PetscDSGetDiscretization(ds, field, (PetscObject *)&fe));
+  PetscCall(PetscFEGetQuadrature(fe, &quadrature));
+  PetscCall(PetscQuadratureGetData(quadrature, &dim, &Nc, &Np, &q_points, &q_weights));
+  PetscCall(PetscQuadratureGetOrder(quadrature, &q_order));
+  PetscCheck(Np <= max_points, PetscObjectComm((PetscObject)dm), PETSC_ERR_ARG_SIZ,
+             "The quadrature has %" PetscInt_FMT " points and the caller has room for %" PetscInt_FMT, Np, max_points);
+
+  *num_points = Np;
+  *order      = q_order;
+  memcpy(points, q_points, (size_t)(Np * dim) * sizeof(PetscReal));
+  memcpy(weights, q_weights, (size_t)(Np * Nc) * sizeof(PetscReal));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+/*
  * The physical value and divergence of one field inside one cell.
  *
  * This is a reconstruction, not an assembly: it reads the cell's own degrees of

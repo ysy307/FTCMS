@@ -12,9 +12,11 @@
 !>
 !> The material response is carried per cell in auxiliary fields rather than in
 !> DS constants, so a mesh of several materials needs one set of kernels. The
-!> inverse mobility is inverted once per cell here, from that cell's own
-!> conductivity; nothing averages two materials together and nothing inverts an
-!> already averaged number.
+!> saturated inverse mobility is inverted once per cell here, from that cell's
+!> own tensor; nothing averages two materials together and nothing inverts an
+!> already averaged number. The state dependence stays a scalar the kernels
+!> divide by, so a pressure-dependent conductivity never needs a second
+!> inversion and never leaves the tensor's positive definiteness.
 !>
 !> A prescribed-pressure boundary is registered as a natural condition with its
 !> own auxiliary vector, because PETSc keys a boundary's auxiliary data by the
@@ -28,15 +30,19 @@ submodule(app_mixed_hydraulic) mixed_hydraulic_setup
     use :: app_mixed_hydraulic_physics, only:invert_mobility, &
                                              MIXED_AUX_FIELDS, &
                                              A_INVERSE_MOBILITY, A_STORAGE, A_SOURCE, &
-                                             A_PRESSURE_OLD, A_BC_PRESSURE, &
+                                             A_PRESSURE_OLD, A_BC_PRESSURE, A_MATERIAL, &
                                              C_DT, C_FLUX_SCALE, C_PRESSURE_SCALE, C_LENGTH_SCALE, &
                                              C_DENSITY, C_GRAVITY_X, C_GRAVITY_Z
+    use :: app_mixed_hydraulic_closure, only:install_storage_laws, clear_storage_laws, &
+                                             install_conductivity_laws, clear_conductivity_laws, &
+                                             storage_magnitude_of
     use :: app_mixed_hydraulic_pointwise, only:f0_flux, f1_flux, f0_conservation, &
-                                               g0_flux_flux, g2_flux_pressure, &
+                                               g0_flux_flux, g0_flux_pressure, g2_flux_pressure, &
                                                g1_pressure_flux, g0_pressure_pressure, &
                                                bd_f0_flux_pressure, bc_essential_flux, &
                                                set_flux_boundary_value, flux_boundary_context, &
                                                reset_flux_boundaries, MAX_FLUX_BOUNDARIES
+    use :: app_mixed_hydraulic_gauge, only:clear_pressure_gauge
     implicit none
 
     ! The RT mass integral is of degree two on an affine cell, which is what a
@@ -127,8 +133,12 @@ contains
 
         call petscds_set_jacobian(ds_handle, 0_c_int, 0_c_int, &
                                   c_funloc(g0_flux_flux), c_null_funptr, c_null_funptr, c_null_funptr, cerr)
+        ! Both blocks of the flux row's pressure dependence: the mobility
+        ! tangent against the test value, and the transport term against its
+        ! gradient. Registering only the second would leave Newton with a
+        ! conductivity frozen at whatever the iterate happened to be.
         if (cerr == 0) call petscds_set_jacobian(ds_handle, 0_c_int, 1_c_int, &
-                                                 c_null_funptr, c_null_funptr, &
+                                                 c_funloc(g0_flux_pressure), c_null_funptr, &
                                                  c_funloc(g2_flux_pressure), c_null_funptr, cerr)
         if (cerr == 0) call petscds_set_jacobian(ds_handle, 1_c_int, 0_c_int, &
                                                  c_null_funptr, c_funloc(g1_pressure_flux), &
@@ -140,6 +150,12 @@ contains
 
         call store_constants(self, ierr)
         if (ierr /= 0) error stop "PETSc rejected the mixed run constants"
+
+        ! Before the coefficients, because a cell's storage magnitude is a
+        ! property of the law it is about to record the index of.
+        call install_storage_laws(self%materials)
+        call install_conductivity_laws(self%materials)
+        self%laws_installed = .true.
 
         call build_auxiliary_fields(self, dimension, ierr)
         if (ierr /= 0) error stop "PETSc could not build the mixed auxiliary fields"
@@ -238,6 +254,8 @@ contains
                                                 dimension, 1_PETSC_INT_KIND, ierr)
         if (ierr == 0) call add_auxiliary_field(self%aux_dm, int(A_BC_PRESSURE - 1, PETSC_INT_KIND), "bc_pressure", &
                                                 dimension, 1_PETSC_INT_KIND, ierr)
+        if (ierr == 0) call add_auxiliary_field(self%aux_dm, int(A_MATERIAL - 1, PETSC_INT_KIND), "material", &
+                                                dimension, 1_PETSC_INT_KIND, ierr)
         if (ierr /= 0) return
 
         call DMCreateDS(self%aux_dm, ierr)
@@ -248,6 +266,12 @@ contains
         if (ierr /= 0) return
 
         call store_material_coefficients(self, ierr)
+        if (ierr /= 0) return
+
+        ! The accepted copy a rejected step is restored from. It starts as the
+        ! coefficients themselves, which is the state before any step ran.
+        call DMCreateLocalVector(self%aux_dm, self%accepted_auxiliary, ierr)
+        if (ierr == 0) call VecCopy(self%auxiliary, self%accepted_auxiliary, ierr)
         if (ierr /= 0) return
 
         call DMGetLabel(self%dm, "Face Sets", self%face_sets, ierr)
@@ -283,6 +307,12 @@ contains
     !> positive definite, stops the run and says which cell and which material:
     !> an inverse mobility is what the weak form integrates, and there is no
     !> value of it that stands in for an impermeable cell.
+    !>
+    !> The cell also records its slot in the closure tables, because a pointwise
+    !> function reaches the storage and conductivity laws by index and has no
+    !> other way to know which material it is running on. One slot keys both, so
+    !> a cell's retention curve and its conductivity curve cannot come from
+    !> different materials.
     subroutine store_material_coefficients(self, ierr)
         implicit none
         class(type_mixed_hydraulic), intent(inout) :: self
@@ -344,9 +374,11 @@ contains
             end do
 
             call PetscSectionGetFieldOffset(section, cell, int(A_STORAGE - 1, PETSC_INT_KIND), offset, ierr)
-            if (ierr == 0) raw(offset + 1) = real(self%materials(found)%storage, PETSC_REAL_KIND)
+            if (ierr == 0) raw(offset + 1) = real(storage_magnitude_of(found), PETSC_REAL_KIND)
             call PetscSectionGetFieldOffset(section, cell, int(A_SOURCE - 1, PETSC_INT_KIND), offset, ierr)
             if (ierr == 0) raw(offset + 1) = real(self%materials(found)%source, PETSC_REAL_KIND)
+            call PetscSectionGetFieldOffset(section, cell, int(A_MATERIAL - 1, PETSC_INT_KIND), offset, ierr)
+            if (ierr == 0) raw(offset + 1) = real(found, PETSC_REAL_KIND)
         end do
 
         call VecRestoreArray(self%auxiliary, raw, ierr)
@@ -472,8 +504,15 @@ contains
         integer(int32) :: b
 
         ierr = 0
+        if (self%laws_installed) then
+            call clear_storage_laws()
+            call clear_conductivity_laws()
+        end if
+        self%laws_installed = .false.
         if (.not. self%ready) return
 
+        if (self%pressure_gauged) call clear_pressure_gauge()
+        self%pressure_gauged = .false.
         call SNESDestroy(self%snes, ierr)
         call VecDestroy(self%solution, ierr)
         call VecDestroy(self%old_solution, ierr)
@@ -481,6 +520,7 @@ contains
         do b = 1, self%num_boundary_aux
             call VecDestroy(self%boundary_aux(b), ierr)
         end do
+        call VecDestroy(self%accepted_auxiliary, ierr)
         call VecDestroy(self%auxiliary, ierr)
         call DMDestroy(self%aux_dm, ierr)
         call DMDestroy(self%dm, ierr)

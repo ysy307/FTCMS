@@ -8,11 +8,18 @@ add_library(SOLVER_MIXED_HYDRAULIC STATIC)
 # ------------------------------------------------------------
 target_sources(SOLVER_MIXED_HYDRAULIC PRIVATE
     mixed_hydraulic_physics.F90
+    mixed_hydraulic_closure.F90
+    mixed_hydraulic_frozen.F90
     mixed_hydraulic_pointwise.F90
     mixed_hydraulic_balance.F90
+    mixed_hydraulic_gauge.F90
     mixed_hydraulic_interface.F90
     mixed_hydraulic_setup.F90
     mixed_hydraulic_solve.F90
+    mixed_hydraulic_column_pointwise.F90
+    mixed_hydraulic_column_primal.F90
+    mixed_hydraulic_column_nodal.F90
+    mixed_hydraulic_column.F90
 )
 
 # ------------------------------------------------------------
@@ -25,10 +32,20 @@ target_include_directories(SOLVER_MIXED_HYDRAULIC PUBLIC
 # ------------------------------------------------------------
 # Dependencies
 # ------------------------------------------------------------
-# Only the interop bridges and the PETSc library: this solver carries its own
-# physics and does not reach into the application layer.
+# The interop bridges, PETSc, and the constitutive models whose retention curve
+# and hydraulic conductivity function the cell-local closure evaluates. Not the
+# application layer: the mixed solver calls the material laws directly rather
+# than through the monolithic path.
+#
+# The governing layer is linked for the frozen closure only. Its contract is
+# (T, p_w, material) -> (W, enthalpy, liquid pressure, mobility), and every one
+# of those is a procedure of type_hydraulic or type_thermal: evaluating them
+# through the repository's own governing objects is what keeps the mixed solver
+# from carrying a second statement of the freezing physics.
 target_link_libraries(SOLVER_MIXED_HYDRAULIC PUBLIC
     SOLVER::CORE
+    SOLVER::CONSTITUTIVE
+    SOLVER::GOVERNING
 )
 
 find_package(PkgConfig REQUIRED)

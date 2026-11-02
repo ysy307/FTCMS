@@ -15,10 +15,15 @@
 !> which is what leaves the physical boundary and source budget after the
 !> internal contributions cancel.
 submodule(app_mixed_hydraulic) mixed_hydraulic_solve
-    use :: app_mixed_hydraulic_physics, only:A_PRESSURE_OLD, A_STORAGE, A_SOURCE, C_DT
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    use :: app_mixed_hydraulic_physics, only:A_PRESSURE_OLD, A_SOURCE, A_MATERIAL, C_DT
     use :: app_mixed_hydraulic_balance, only:MAX_CELL_FACETS, reconstruct_cell_facet_flux, &
                                              reconstruct_cell_divergence, reconstruct_cell_pressure, &
                                              cell_is_owned
+    use :: app_mixed_hydraulic_closure, only:eval_storage, clear_mobility_fault, &
+                                             mobility_fault_recorded, mobility_fault_report
+    use :: app_mixed_hydraulic_gauge, only:type_mixed_gauge_report, measure_gauge_state, &
+                                           install_pressure_gauge, gauge_data_is_compatible
     implicit none
 
 contains
@@ -32,14 +37,168 @@ contains
         PetscErrorCode, intent(inout) :: ierr
 
         SNESConvergedReason :: reason
+        type(type_mixed_gauge_report) :: gauge_report
+        Vec :: boundary_state
+        PetscErrorCode :: restore_ierr
+        PetscMPIInt :: rank
 
         accepted = .false.
         ierr = 0
+        ! A failure to undo a failed trial must not hide what failed, so the
+        ! restore reports separately and the original error is the one returned.
+        restore_ierr = 0
         if (.not. self%ready) then
             ierr = 1
             return
         end if
-        if (dt <= 0.0_real64) error stop "The mixed hydraulic step length has to be positive"
+        ! Nothing has been touched yet, so a refused step needs no rollback.
+        ! A nonpositive or nonfinite length would divide the storage term by
+        ! itself; it is reported rather than accepted with a zero storage rate.
+        if (.not. step_is_usable(dt)) then
+            ierr = MIXED_ERR_INVALID_STEP
+            return
+        end if
+
+        call begin_trial(self, dt, ierr)
+        if (ierr /= 0) then
+            call restore_accepted_state(self, restore_ierr)
+            return
+        end if
+
+        ! Test compatibility before solving. With a cell that can store water
+        ! the pressure constant is physical, so no gauge applies.
+        call self%get_local_solution(boundary_state, ierr)
+        if (ierr /= 0) then
+            call restore_accepted_state(self, restore_ierr)
+            return
+        end if
+        call measure_gauge_state(self%dm, boundary_state, self%aux_dm, self%auxiliary, &
+                                 self%flux_scale, gauge_report, ierr)
+        if (ierr /= 0) then
+            call restore_accepted_state(self, restore_ierr)
+            return
+        end if
+        if (gauge_report%eligible) then
+            if (.not. gauge_data_is_compatible(gauge_report)) then
+                call MPI_Comm_rank(PETSC_COMM_WORLD, rank, ierr)
+                if (rank == 0) write (*, '(a)') "Incompatible steady all-flux data: boundary flux does not balance source"
+                call restore_accepted_state(self, restore_ierr)
+                ierr = MIXED_ERR_INCOMPATIBLE
+                return
+            end if
+            if (.not. self%pressure_gauged) then
+                call install_pressure_gauge(self%dm, self%length_scale, gauge_report, ierr)
+                if (ierr /= 0) then
+                    call restore_accepted_state(self, restore_ierr)
+                    return
+                end if
+                self%pressure_gauged = .true.
+            end if
+        end if
+
+        ! Whatever a kernel could not evaluate during this trial is this trial's
+        ! own, so the record starts empty and is read only on a failed path.
+        call clear_mobility_fault()
+
+        call SNESSetSolution(self%snes, self%solution, ierr)
+        if (ierr == 0) call SNESSolve(self%snes, PETSC_NULL_VEC, self%solution, ierr)
+        if (ierr /= 0) then
+            ! A PETSc error leaves the iterate wherever the failed solve
+            ! stopped, which is not a state any history describes.
+            call restore_accepted_state(self, restore_ierr)
+            call report_mobility_fault(ierr)
+            return
+        end if
+
+        call SNESGetConvergedReason(self%snes, reason, ierr)
+        if (ierr /= 0) then
+            call restore_accepted_state(self, restore_ierr)
+            call report_mobility_fault(ierr)
+            return
+        end if
+        if (int(reason%v, int32) <= 0) then
+            call restore_accepted_state(self, ierr)
+            call report_mobility_fault(ierr)
+            return
+        end if
+
+        ! A converged reason is not a finite answer: a solve that overflowed can
+        ! satisfy a relative test on a nonfinite norm.
+        if (.not. solution_is_finite(self, ierr)) then
+            call restore_accepted_state(self, restore_ierr)
+            if (ierr == 0) ierr = MIXED_ERR_NONFINITE
+            return
+        end if
+
+        call VecCopy(self%solution, self%old_solution, ierr)
+        if (ierr /= 0) then
+            call restore_accepted_state(self, restore_ierr)
+            return
+        end if
+        self%accepted_dt = dt
+        accepted = .true.
+    end subroutine solve_step
+
+    !> Turn a recorded mobility fault into this step's reason for failing.
+    !>
+    !> A pointwise kernel cannot refuse a step itself: it writes a nonfinite
+    !> residual, which SNES turns into a diverged reason or a PETSc error
+    !> depending on the run's settings. Either way the step is already being
+    !> rejected by the time this is reached, and the only thing left is to say
+    !> which state the model had no conductivity for. The fault takes precedence
+    !> over the generic error because it is the cause of it.
+    subroutine report_mobility_fault(ierr)
+        implicit none
+        PetscErrorCode, intent(inout) :: ierr
+
+        integer(int32) :: slot, local_fault, any_fault, mpi_err
+        real(real64) :: pressure, value
+
+        ! The fault is per rank but the step is refused on all of them, so the
+        ! flag is reduced: every rank has to come back with the same reason.
+        local_fault = 0
+        if (mobility_fault_recorded()) local_fault = 1
+        call MPI_Allreduce(local_fault, any_fault, 1, MPI_INTEGER, MPI_MAX, PETSC_COMM_WORLD, mpi_err)
+        if (mpi_err /= 0 .or. any_fault == 0) return
+
+        if (local_fault == 1) then
+            slot = 0
+            pressure = 0.0_real64
+            value = 0.0_real64
+            call mobility_fault_report(slot, pressure, value)
+            write (*, '(a,i0,a,es13.6,a,es13.6)') &
+                "Unusable mobility: material slot ", slot, " at pressure ", pressure, &
+                " Pa has conductivity ", value
+        end if
+        ierr = MIXED_ERR_MOBILITY
+    end subroutine report_mobility_fault
+
+    !> Whether this step length can be differenced over at all.
+    pure logical function step_is_usable(dt)
+        implicit none
+        real(real64), intent(in) :: dt
+
+        ! Fortran does not guarantee short-circuit evaluation of .and.; a
+        ! comparison with NaN can trap even after a failed finiteness test.
+        step_is_usable = .false.
+        if (.not. ieee_is_finite(dt)) return
+        step_is_usable = (dt > 0.0_real64)
+    end function step_is_usable
+
+    !> Put the solver into the state one trial of length `dt` needs.
+    !>
+    !> Everything this writes is a function of the accepted state, which is why
+    !> `restore_accepted_state` can undo it by writing it again.
+    subroutine begin_trial(self, dt, ierr)
+        implicit none
+        class(type_mixed_hydraulic), intent(inout) :: self
+        real(real64), intent(in) :: dt
+        PetscErrorCode, intent(inout) :: ierr
+
+        ! Keep the auxiliary data as the accepted state left it, before the
+        ! storage history below is written over it.
+        call VecCopy(self%auxiliary, self%accepted_auxiliary, ierr)
+        if (ierr /= 0) return
 
         self%dt = dt
         self%constants(C_DT) = real(dt, PETSC_REAL_KIND)
@@ -50,24 +209,53 @@ contains
         ! old_solution, not from the iterate, so a retried step sees the same
         ! history the failed one did.
         call write_accepted_pressure(self, ierr)
+    end subroutine begin_trial
+
+    !> Undo a failed trial, exactly.
+    !>
+    !> The iterate comes back from `old_solution`, which a failed step never
+    !> writes, and the auxiliary data from the copy `begin_trial` kept. The
+    !> history is restored rather than rewritten from `old_solution`: after an
+    !> accepted step the accepted history describes the start of that step, not
+    !> the state the step reached, so rewriting it would silently advance the
+    !> accepted state that a rejected step is supposed to leave alone -- and the
+    !> balance audit of the last accepted step would then report the source term
+    !> of a step that never happened. Each boundary's copy is refreshed from the
+    !> restored volume data, which is where it came from.
+    subroutine restore_accepted_state(self, ierr)
+        implicit none
+        class(type_mixed_hydraulic), intent(inout) :: self
+        PetscErrorCode, intent(inout) :: ierr
+
+        integer(int32) :: b
+
+        call VecCopy(self%old_solution, self%solution, ierr)
+        if (ierr == 0) call VecCopy(self%accepted_auxiliary, self%auxiliary, ierr)
         if (ierr /= 0) return
 
-        call SNESSetSolution(self%snes, self%solution, ierr)
-        if (ierr == 0) call SNESSolve(self%snes, PETSC_NULL_VEC, self%solution, ierr)
-        if (ierr /= 0) return
+        do b = 1, self%num_boundary_aux
+            call copy_history_into(self, self%boundary_aux(b), ierr)
+            if (ierr /= 0) return
+        end do
 
-        call SNESGetConvergedReason(self%snes, reason, ierr)
-        if (ierr /= 0) return
-        if (int(reason%v, int32) <= 0) then
-            ! Put the iterate back where the accepted state left it, so the
-            ! history and the solution still describe the same instant.
-            call VecCopy(self%old_solution, self%solution, ierr)
-            return
-        end if
+        self%dt = self%accepted_dt
+        self%constants(C_DT) = real(self%accepted_dt, PETSC_REAL_KIND)
+        call PetscDSSetConstants(self%ds, int(MIXED_CONSTANTS, PETSC_INT_KIND), self%constants, ierr)
+    end subroutine restore_accepted_state
 
-        call VecCopy(self%solution, self%old_solution, ierr)
-        if (ierr == 0) accepted = .true.
-    end subroutine solve_step
+    !> Whether every entry of the solved state is a finite number.
+    logical function solution_is_finite(self, ierr)
+        implicit none
+        class(type_mixed_hydraulic), intent(inout) :: self
+        PetscErrorCode, intent(inout) :: ierr
+
+        PetscReal :: measured
+
+        solution_is_finite = .false.
+        call VecNorm(self%solution, NORM_INFINITY, measured, ierr)
+        if (ierr /= 0) return
+        solution_is_finite = ieee_is_finite(real(measured, real64))
+    end function solution_is_finite
 
     !> Copy the accepted cell pressures into the auxiliary history field.
     subroutine write_accepted_pressure(self, ierr)
@@ -206,8 +394,10 @@ contains
         PetscInt, pointer :: support(:)
         real(real64) :: moments(MAX_CELL_FACETS), neighbour_moments(MAX_CELL_FACETS)
         real(real64) :: divergence_integral, volume, outward_sum, defect
-        real(real64) :: pressure, pressure_old, storage, source
+        real(real64) :: pressure, pressure_old, source
+        real(real64) :: stored_now, stored_old, capacity
         integer(int32) :: num_facets, neighbour_facet_count, neighbour_count, f, g, owned_index
+        integer(int32) :: slot
         PetscInt :: neighbour
 
         report%max_facet_mismatch = 0.0_real64
@@ -272,20 +462,30 @@ contains
             end do
             if (ierr /= 0) exit
 
-            storage = 0.0_real64
             source = 0.0_real64
             pressure_old = 0.0_real64
-            call PetscSectionGetFieldDof(aux_section, cell, int(A_STORAGE - 1, PETSC_INT_KIND), num_dofs, ierr)
+            slot = 0
+            call PetscSectionGetFieldDof(aux_section, cell, int(A_SOURCE - 1, PETSC_INT_KIND), num_dofs, ierr)
             if (ierr == 0 .and. num_dofs > 0) then
-                call PetscSectionGetFieldOffset(aux_section, cell, int(A_STORAGE - 1, PETSC_INT_KIND), offset, ierr)
-                if (ierr == 0) storage = real(aux_raw(offset + 1), real64)
                 call PetscSectionGetFieldOffset(aux_section, cell, int(A_SOURCE - 1, PETSC_INT_KIND), offset, ierr)
                 if (ierr == 0) source = real(aux_raw(offset + 1), real64)
                 call PetscSectionGetFieldOffset(aux_section, cell, int(A_PRESSURE_OLD - 1, PETSC_INT_KIND), offset, ierr)
                 if (ierr == 0) pressure_old = real(aux_raw(offset + 1), real64)
+                call PetscSectionGetFieldOffset(aux_section, cell, int(A_MATERIAL - 1, PETSC_INT_KIND), offset, ierr)
+                if (ierr == 0) slot = nint(real(aux_raw(offset + 1), real64), int32)
             end if
 
-            defect = storage*(pressure - pressure_old)*volume &
+            ! The same stored quantity the residual differences, at the same two
+            ! pressures: the accepted one comes from the history field, which a
+            ! step advances before it solves and never after, so this still
+            ! reads the start of the step once the step has been accepted.
+            stored_now = 0.0_real64
+            stored_old = 0.0_real64
+            capacity = 0.0_real64
+            call eval_storage(slot, pressure, stored_now, capacity)
+            call eval_storage(slot, pressure_old, stored_old, capacity)
+
+            defect = (stored_now - stored_old)*volume &
                      + self%dt*(outward_sum - source*volume)
             report%source_rate = report%source_rate + source*volume
             report%domain_defect = report%domain_defect + defect

@@ -18,12 +18,15 @@ module app_mixed_hydraulic_balance
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use, intrinsic :: iso_c_binding, only: c_int, c_double, c_ptr
     use :: petscdmplex
-    use :: core_interop_petscfe, only:petscfe_evaluate_cell, petscfe_reference_coordinates
+    use :: core_interop_petscfe, only:petscfe_evaluate_cell, petscfe_reference_coordinates, &
+                                      petscfe_quadrature
     use :: app_mixed_hydraulic_physics, only:MIXED_DIMENSION, MIXED_FIELD_FLUX, MIXED_FIELD_PRESSURE
     implicit none
     private
 
     public :: MAX_CELL_FACETS
+    public :: MAX_QUADRATURE_POINTS
+    public :: cell_quadrature_rule
     public :: reconstruct_cell_facet_flux
     public :: reconstruct_cell_divergence
     public :: reconstruct_cell_pressure
@@ -31,7 +34,7 @@ module app_mixed_hydraulic_balance
     public :: cell_volume
     public :: audit_facet_continuity
 
-    !> The most facets one supported cell has; a triangle uses three.
+    !> The most facets one supported cell has: a triangle three, a rectangle four.
     integer(int32), parameter :: MAX_CELL_FACETS = 4
 
     ! Two-point Gauss on the unit interval, exact through degree three. The
@@ -42,14 +45,79 @@ module app_mixed_hydraulic_balance
         [0.5d0 - 0.5d0/sqrt(3.0d0), 0.5d0 + 0.5d0/sqrt(3.0d0)]
     real(real64), parameter :: FACET_WEIGHTS(FACET_POINTS) = [0.5d0, 0.5d0]
 
-    ! Edge midpoints of PETSc's reference triangle, whose vertices are
-    ! (-1,-1), (1,-1) and (-1,1). Equal weights make this exact through
-    ! degree two, which covers a divergence that is constant per cell.
-    integer(int32), parameter :: CELL_POINTS = 3
-    real(real64), parameter :: CELL_NODES(MIXED_DIMENSION, CELL_POINTS) = &
-        reshape([0.0d0, -1.0d0, -1.0d0, 0.0d0, 0.0d0, 0.0d0], [MIXED_DIMENSION, CELL_POINTS])
+    ! How many facets each supported cell has, which is what tells the two
+    ! reference cells apart. PETSc's reference triangle has vertices (-1,-1),
+    ! (1,-1) and (-1,1); its reference quadrilateral is the square [-1,1]^2.
+    integer(int32), parameter :: TRIANGLE_FACETS = 3
+    integer(int32), parameter :: QUADRILATERAL_FACETS = 4
+
+    !> The most quadrature points a rule this module will carry may have.
+    integer(int32), parameter :: MAX_QUADRATURE_POINTS = 32
 
 contains
+
+    !> The rule one field of a DM is integrated with, on the reference cell.
+    !>
+    !> \[
+    !>   \int_K f \approx |K|\sum_q w_q f(\xi_q),\qquad \sum_q w_q = 1,
+    !> \]
+    !>
+    !> on an affine cell. The points and the point count are PETSc's own, read
+    !> from the `PetscFE` the discrete system holds, so an audit integrating with
+    !> this rule integrates what the element loop integrates rather than what the
+    !> element was asked for. The weights are rescaled to sum to one so that the
+    !> caller may use a measured cell volume and never the reference one.
+    !>
+    !> Assumes an affine cell. Exact for an integrand of degree `order` or less;
+    !> no other error bound applies. \(O(1)\) arithmetic and memory.
+    !>
+    !> Fails by returning the PETSc error with `num_points = 0`, which includes
+    !> a rule with more points than `MAX_QUADRATURE_POINTS`.
+    subroutine cell_quadrature_rule(dm, field, points, weights, num_points, order, ierr)
+        implicit none
+        !> The DM whose discrete system holds the field.
+        DM, intent(in) :: dm
+        !> The field whose rule is asked for.
+        PetscInt, intent(in) :: field
+        !> The reference points, (dim, MAX_QUADRATURE_POINTS).
+        real(c_double), intent(inout) :: points(MIXED_DIMENSION, MAX_QUADRATURE_POINTS)
+        !> The weights, normalised to sum to one.
+        real(c_double), intent(inout) :: weights(MAX_QUADRATURE_POINTS)
+        !> How many points the rule has.
+        integer(int32), intent(inout) :: num_points
+        !> The polynomial degree the rule integrates exactly.
+        integer(int32), intent(inout) :: order
+        PetscErrorCode, intent(inout) :: ierr
+
+        type(c_ptr) :: dm_handle
+        integer(c_int) :: counted, rule_order, cerr
+        real(real64) :: total
+
+        points = 0.0d0
+        weights = 0.0d0
+        num_points = 0
+        order = -1
+
+        dm_handle = transfer(dm%v, dm_handle)
+        counted = 0_c_int
+        rule_order = -1_c_int
+        cerr = 0
+        call petscfe_quadrature(dm_handle, int(field, c_int), points, weights, counted, rule_order, cerr)
+        if (cerr /= 0) then
+            ierr = int(cerr)
+            return
+        end if
+
+        num_points = int(counted, int32)
+        order = int(rule_order, int32)
+        total = sum(real(weights(1:num_points), real64))
+        if (.not. (abs(total) > 0.0d0)) then
+            num_points = 0
+            ierr = 1
+            return
+        end if
+        weights(1:num_points) = real(real(weights(1:num_points), real64)/total, c_double)
+    end subroutine cell_quadrature_rule
 
     !> Whether this rank owns the cell, so that a ghost is counted once overall.
     function cell_is_owned(dm, cell) result(owned)
@@ -98,7 +166,7 @@ contains
     !>
     !> Fails by returning the PETSc error of the first failing query with
     !> `num_facets = 0`; the outputs are initialised on every path.
-    subroutine reconstruct_cell_facet_flux(dm, local_x, flux_scale, cell, facets, moments, num_facets, ierr)
+    subroutine reconstruct_cell_facet_flux(dm, local_x, flux_scale, cell, facets, moments, num_facets, ierr, field)
         implicit none
         !> The solve DM, carrying the flux field.
         DM, intent(in) :: dm
@@ -115,7 +183,10 @@ contains
         !> How many facets the cell has.
         integer(int32), intent(inout) :: num_facets
         PetscErrorCode, intent(inout) :: ierr
+        !> The field carrying the flux; the isothermal layout's when absent.
+        PetscInt, intent(in), optional :: field
 
+        PetscInt :: flux_field
         PetscInt, pointer :: cone(:)
         PetscScalar, pointer :: facet_coordinates(:)
         PetscSection :: coordinate_section
@@ -137,6 +208,8 @@ contains
         facets = 0_PETSC_INT_KIND
         moments = 0.0d0
         num_facets = 0
+        flux_field = MIXED_FIELD_FLUX
+        if (present(field)) flux_field = field
 
         call DMPlexGetCone(dm, cell, cone, ierr)
         if (ierr /= 0) return
@@ -201,7 +274,7 @@ contains
             cerr = 0
             call petscfe_reference_coordinates(dm_handle, int(cell, c_int), points, reference, cerr)
             if (cerr == 0) then
-                call petscfe_evaluate_cell(dm_handle, vec_handle, int(MIXED_FIELD_FLUX, c_int), &
+                call petscfe_evaluate_cell(dm_handle, vec_handle, int(flux_field, c_int), &
                                            int(cell, c_int), reference, values, divergence, cerr)
             end if
             if (cerr /= 0) then
@@ -225,9 +298,15 @@ contains
     !>
     !> The divergence comes from PETSc's pushforward of the reference basis
     !> gradients, which is the same map the assembly uses, evaluated here from
-    !> the cell's own degrees of freedom. Assumes an affine cell. Exact for a
-    !> divergence of degree two or less. Arithmetic and memory are \(O(1)\).
-    subroutine reconstruct_cell_divergence(dm, local_x, flux_scale, cell, integral, volume, ierr)
+    !> the cell's own degrees of freedom. The points are the flux field's own
+    !> rule, read from its `PetscFE`, so the rule belongs to the reference cell
+    !> the field was built on rather than to one cell shape this module knows
+    !> about. Assumes an affine cell. Exact for a divergence the field's own
+    !> quadrature integrates exactly. Arithmetic and memory are \(O(1)\).
+    !>
+    !> Fails by returning the first PETSc error -- from the cell geometry, the
+    !> field's quadrature or the tabulation -- with both outputs at zero.
+    subroutine reconstruct_cell_divergence(dm, local_x, flux_scale, cell, integral, volume, ierr, field)
         implicit none
         DM, intent(in) :: dm
         Vec, intent(in) :: local_x
@@ -239,39 +318,62 @@ contains
         !> The cell area, m2.
         real(real64), intent(inout) :: volume
         PetscErrorCode, intent(inout) :: ierr
+        !> The field carrying the flux; the isothermal layout's when absent.
+        PetscInt, intent(in), optional :: field
 
+        PetscInt :: flux_field
         type(c_ptr) :: dm_handle, vec_handle
-        real(c_double) :: reference(MIXED_DIMENSION, CELL_POINTS)
-        real(c_double) :: values(MIXED_DIMENSION, CELL_POINTS)
-        real(c_double) :: divergence(CELL_POINTS)
+        real(c_double) :: points(MIXED_DIMENSION, MAX_QUADRATURE_POINTS)
+        real(c_double) :: weights(MAX_QUADRATURE_POINTS)
+        real(c_double) :: values(MIXED_DIMENSION, MAX_QUADRATURE_POINTS)
+        real(c_double) :: divergence(MAX_QUADRATURE_POINTS)
+        integer(int32) :: num_points, order, q
+        real(real64) :: mean
         integer(c_int) :: cerr
 
         integral = 0.0d0
         volume = 0.0d0
+        flux_field = MIXED_FIELD_FLUX
+        if (present(field)) flux_field = field
 
         call cell_volume(dm, cell, volume, ierr)
+        if (ierr /= 0) return
+        call cell_quadrature_rule(dm, flux_field, points, weights, num_points, order, ierr)
         if (ierr /= 0) return
 
         dm_handle = transfer(dm%v, dm_handle)
         vec_handle = transfer(local_x%v, vec_handle)
-        reference = real(CELL_NODES, c_double)
 
         cerr = 0
-        call petscfe_evaluate_cell(dm_handle, vec_handle, int(MIXED_FIELD_FLUX, c_int), &
-                                   int(cell, c_int), reference, values, divergence, cerr)
+        call petscfe_evaluate_cell(dm_handle, vec_handle, int(flux_field, c_int), &
+                                   int(cell, c_int), points(:, :num_points), &
+                                   values(:, :num_points), divergence(:num_points), cerr)
         if (cerr /= 0) then
             ierr = int(cerr)
             return
         end if
 
-        integral = flux_scale*volume*sum(real(divergence, real64))/real(CELL_POINTS, real64)
+        ! The weights sum to one, so the measured area carries the scaling and
+        ! the reference cell's own volume never enters.
+        mean = 0.0d0
+        do q = 1, num_points
+            mean = mean + real(weights(q), real64)*real(divergence(q), real64)
+        end do
+        integral = flux_scale*volume*mean
     end subroutine reconstruct_cell_divergence
 
     !> The cell's pressure, Pa.
     !>
-    !> A P0 field is constant over the cell, so any interior point answers; the
-    !> centroid of the reference cell is used.
-    subroutine reconstruct_cell_pressure(dm, local_x, pressure_scale, cell, pressure, ierr)
+    !> A P0 field is constant over the cell, so any interior point answers. The
+    !> point used is the centroid of the reference cell, which is also the
+    !> preimage of the physical centroid under an affine map -- so a caller may
+    !> pass a field that is not cell-constant and still get the value at the
+    !> cell's centre. That is what makes the reference point cell-shape
+    !> dependent rather than a constant of this module.
+    !>
+    !> Fails with a PETSc error for a cell whose reference centroid is unknown,
+    !> which is any cell that is neither a triangle nor a quadrilateral.
+    subroutine reconstruct_cell_pressure(dm, local_x, pressure_scale, cell, pressure, ierr, field)
         implicit none
         DM, intent(in) :: dm
         Vec, intent(in) :: local_x
@@ -281,7 +383,10 @@ contains
         !> The cell pressure, Pa.
         real(real64), intent(inout) :: pressure
         PetscErrorCode, intent(inout) :: ierr
+        !> The field carrying the pressure; the isothermal layout's when absent.
+        PetscInt, intent(in), optional :: field
 
+        PetscInt :: pressure_field
         type(c_ptr) :: dm_handle, vec_handle
         real(c_double) :: reference(MIXED_DIMENSION, 1)
         real(c_double) :: values(1, 1)
@@ -290,13 +395,17 @@ contains
 
         pressure = 0.0d0
         ierr = 0
+        pressure_field = MIXED_FIELD_PRESSURE
+        if (present(field)) pressure_field = field
+
+        call cell_reference_centroid(dm, cell, reference(:, 1), ierr)
+        if (ierr /= 0) return
 
         dm_handle = transfer(dm%v, dm_handle)
         vec_handle = transfer(local_x%v, vec_handle)
-        reference(:, 1) = real([-1.0d0/3.0d0, -1.0d0/3.0d0], c_double)
 
         cerr = 0
-        call petscfe_evaluate_cell(dm_handle, vec_handle, int(MIXED_FIELD_PRESSURE, c_int), &
+        call petscfe_evaluate_cell(dm_handle, vec_handle, int(pressure_field, c_int), &
                                    int(cell, c_int), reference, values, divergence, cerr)
         if (cerr /= 0) then
             ierr = int(cerr)
@@ -324,7 +433,7 @@ contains
     !> local cells, memory \(O(P)\) in the mesh's global point count.
     !>
     !> Fails by returning the first PETSc error with the outputs at zero.
-    subroutine audit_facet_continuity(dm, local_x, flux_scale, max_mismatch, interior_facets, ierr)
+    subroutine audit_facet_continuity(dm, local_x, flux_scale, max_mismatch, interior_facets, ierr, field)
         implicit none
         !> The solve DM.
         DM, intent(in) :: dm
@@ -337,6 +446,10 @@ contains
         !> How many facets were seen from two cells.
         integer(int32), intent(inout) :: interior_facets
         PetscErrorCode, intent(inout) :: ierr
+        !> The field carrying the flux; the isothermal layout's when absent.
+        PetscInt, intent(in), optional :: field
+
+        PetscInt :: flux_field
 
         IS :: numbering
         PetscInt, pointer :: numbers(:)
@@ -350,6 +463,8 @@ contains
 
         max_mismatch = 0.0d0
         interior_facets = 0
+        flux_field = MIXED_FIELD_FLUX
+        if (present(field)) flux_field = field
 
         call DMPlexGetChart(dm, p_start, p_end, ierr)
         if (ierr == 0) call DMPlexGetHeightStratum(dm, 0_PETSC_INT_KIND, c_start, c_end, ierr)
@@ -381,7 +496,8 @@ contains
 
         do cell = c_start, c_end - 1
             if (.not. cell_is_owned(dm, cell)) cycle
-            call reconstruct_cell_facet_flux(dm, local_x, flux_scale, cell, facets, moments, num_facets, ierr)
+            call reconstruct_cell_facet_flux(dm, local_x, flux_scale, cell, facets, moments, num_facets, ierr, &
+                                             field=flux_field)
             if (ierr /= 0) exit
             do f = 1, num_facets
                 index = global_index_of(numbers(facets(f) - p_start + 1)) + 1
@@ -412,6 +528,38 @@ contains
 
         deallocate (facet_sum, facet_sum_all, facet_count, facet_count_all)
     end subroutine audit_facet_continuity
+
+    !> The centroid of one cell's reference cell, in reference coordinates.
+    !>
+    !> Which reference cell that is follows from the facet count, because the
+    !> two shapes this module supports have different ones: PETSc's reference
+    !> triangle is centred at \((-1/3,-1/3)\) and its reference square at the
+    !> origin. Using the triangle's point on a quadrilateral evaluates a field
+    !> a sixth of a cell away from the centre in each direction, which is
+    !> invisible for a cell-constant field and wrong for every other one.
+    subroutine cell_reference_centroid(dm, cell, reference, ierr)
+        implicit none
+        DM, intent(in) :: dm
+        PetscInt, intent(in) :: cell
+        !> The reference centroid.
+        real(c_double), intent(inout) :: reference(MIXED_DIMENSION)
+        PetscErrorCode, intent(inout) :: ierr
+
+        PetscInt :: cone_size
+
+        reference = 0.0_c_double
+        call DMPlexGetConeSize(dm, cell, cone_size, ierr)
+        if (ierr /= 0) return
+
+        select case (int(cone_size, int32))
+        case (TRIANGLE_FACETS)
+            reference = real([-1.0d0/3.0d0, -1.0d0/3.0d0], c_double)
+        case (QUADRILATERAL_FACETS)
+            reference = 0.0_c_double
+        case default
+            ierr = 1
+        end select
+    end subroutine cell_reference_centroid
 
     !> PETSc's global number of a point, whether or not this rank owns it.
     pure function global_index_of(number) result(index)

@@ -491,12 +491,25 @@ contains
         class(type_jacobian_matrix), intent(inout) :: self
 
         PetscErrorCode :: ierr
+        PetscBool :: assembled
         integer(int32) :: i
 
         if (.not. allocated(self%system)) return
         do i = 1, size(self%system)
             if (.not. self%system(i)%ready) cycle
+            ! An element loop that is not followed by a solve -- a residual-only
+            ! pass, a rejected step -- leaves its additions pending, and PETSc
+            ! refuses to zero a matrix in that state. Finalising them first
+            ! changes nothing, since they are zeroed next.
+            call MatAssembled(self%system(i)%matrix, assembled, ierr)
+            if (ierr /= 0) error stop "PETSc could not report the Jacobian assembly state"
+            if (assembled .eqv. PETSC_FALSE) then
+                call MatAssemblyBegin(self%system(i)%matrix, MAT_FINAL_ASSEMBLY, ierr)
+                if (ierr == 0) call MatAssemblyEnd(self%system(i)%matrix, MAT_FINAL_ASSEMBLY, ierr)
+                if (ierr /= 0) error stop "PETSc could not finalise the pending Jacobian entries"
+            end if
             call MatZeroEntries(self%system(i)%matrix, ierr)
+            if (ierr /= 0) error stop "PETSc could not zero the Jacobian"
             self%system(i)%num_prescribed = 0
         end do
     end subroutine zero_all_jacobian_matrix

@@ -40,15 +40,10 @@ module models_phase_change_fusion
 
     end type type_fusion
 
-    !> Suction-domain smoothing scale shared by compute_effective_suction's
-    !> smooth maximum and compute_smooth_min's smooth minimum, so the storage
-    !> split's max-switch and the pore-volume blend's min-switch close at the
-    !> same scale.
+    !> Half-width of the compact C1 transition in suction space.
     !>
-    !> epsilon_s is the suction equivalent of 0.01 K through the Clapeyron
-    !> slope rho_w L_f/T_m, i.e. below any temperature difference the
-    !> discretization resolves; it exists only so both switches are
-    !> differentiable for the Newton linearization.
+    !> The width is the Clapeyron-equivalent suction of 0.01 K. Outside this
+    !> band the regularized maximum is exactly the ordinary maximum.
     real(real64), private, parameter :: SUCTION_SMOOTHING = 1.0d-2 * rho_std * Lf0 / (Tf0 + TtoK)
 
     !> Let a full pore keep freezing and return the displaced water to the mass
@@ -95,11 +90,6 @@ module models_phase_change_fusion
     !> the ice-water pressure difference is rescaled by this factor.
     !> sigma_aw = 0.0728 N/m, sigma_iw = 0.033 N/m at 0 C.
     real(real64), private, parameter :: SURFACE_TENSION_RATIO = 0.0728d0 / 0.033d0
-
-    !> Width of the C^1 band over which the pore overfill is removed, in water
-    !> content. Small against the porosity so the cap is exact on both sides
-    !> outside it, wide enough that the tangent transition is resolvable.
-    real(real64), private, parameter :: PORE_EXCESS_SMOOTHING = 1.0d-3
 
 contains
 
@@ -336,73 +326,15 @@ contains
         if (present(dsuction_eff_dT_out)) dsuction_eff_dT_out = dsuction_eff_dT
     end subroutine phase_split_painter_karra
 
-    !> One-sided C^1 ramp: exactly zero up to the corner, exactly the identity
-    !> past the band, cubic in between.
-    !>
-    !> \[ h(d,\varepsilon) = \begin{cases} 0 & d \le 0 \\
-    !>    2d^2/\varepsilon - d^3/\varepsilon^2 & 0 < d < \varepsilon \\
-    !>    d & d \ge \varepsilon \end{cases} \]
-    !>
-    !> One-sided because the quantity it caps is already inactive below the
-    !> corner: a symmetric band would give the unconstrained state a spurious
-    !> tangent. Value and slope match at both breakpoints (h(0)=h'(0)=0,
-    !> h(eps)=eps, h'(eps)=1), and h is monotone on the band.
-    pure elemental function ramp_band(d, band) result(h)
-        implicit none
-        !> Argument of the ramp
-        real(real64), intent(in) :: d
-        !> Width of the regularized band, > 0
-        real(real64), intent(in) :: band
-        !> Regularized max(0, d)
-        real(real64) :: h
-
-        if (d <= 0.0d0) then
-            h = 0.0d0
-        else if (band <= 0.0d0 .or. d >= band) then
-            h = d
-        else
-            h = 2.0d0 * d**2 / band - d**3 / band**2
-        end if
-    end function ramp_band
-
-    !> Derivative of ramp_band with respect to its first argument.
-    pure elemental function ramp_band_deriv(d, band) result(hp)
-        implicit none
-        !> Argument of the ramp
-        real(real64), intent(in) :: d
-        !> Width of the regularized band, > 0
-        real(real64), intent(in) :: band
-        !> dh/dd
-        real(real64) :: hp
-
-        if (d <= 0.0d0) then
-            hp = 0.0d0
-        else if (band <= 0.0d0 .or. d >= band) then
-            hp = 1.0d0
-        else
-            hp = 4.0d0 * d / band - 3.0d0 * d**2 / band**2
-        end if
-    end function ramp_band_deriv
-
-    !> C^1 compact-support ramp underlying the smooth max/min below.
+    !> Compact C1 ramp used by the regularized maximum.
     !>
     !> \[ h(d) = \begin{cases} 0 & d \le -\varepsilon_s \\
-    !>    (d+\varepsilon_s)^2/(4\varepsilon_s) & -\varepsilon_s < d < \varepsilon_s \\
-    !>    d & d \ge \varepsilon_s \end{cases},
-    !>    \qquad h'(d) = \begin{cases} 0 & d \le -\varepsilon_s \\
-    !>    (d+\varepsilon_s)/(2\varepsilon_s) & -\varepsilon_s < d < \varepsilon_s \\
-    !>    1 & d \ge \varepsilon_s \end{cases} \]
+    !>    (d+\varepsilon_s)^2/(4\varepsilon_s) & |d| < \varepsilon_s \\
+    !>    d & d \ge \varepsilon_s \end{cases} \]
     !>
-    !> h is the C^1 regularization of the ramp max(0,d): value AND slope match
-    !> the corner at both breakpoints, h(-eps_s)=0, h'(-eps_s)=0, h(eps_s)=eps_s,
-    !> h'(eps_s)=1. Unlike a hyperbolic smoothing (sqrt(d^2+eps^2)-based), h has
-    !> COMPACT support: it equals the exact corner max(0,d) once |d| >= eps_s,
-    !> not merely in the limit. That compact support is the entire reason for
-    !> this replacement - smooth_max/smooth_min built from h below reduce to
-    !> the EXACT max/min outside the band, so no smoothing tail can leak ice
-    !> into a state arbitrarily far from the freezing interface (the hyperbolic
-    !> form's s_eff > max(s_m,s_f) at every finite state, however far, is what
-    !> produced ice at every node of the initial condition).
+    !> The value and first derivative match at both band edges. The compact
+    !> support prevents a smoothing tail from creating ice far from the
+    !> freezing transition.
     pure elemental function smooth_ramp(d) result(h)
         implicit none
         real(real64), intent(in) :: d
@@ -417,7 +349,7 @@ contains
         end if
     end function smooth_ramp
 
-    !> Derivative h'(d) of smooth_ramp; see that function's docstring.
+    !> Derivative of the compact C1 ramp.
     pure elemental function smooth_ramp_deriv(d) result(hp)
         implicit none
         real(real64), intent(in) :: d
@@ -432,18 +364,9 @@ contains
         end if
     end function smooth_ramp_deriv
 
-    !> Effective suction governing the liquid water content, smoothed max.
+    !> Effective suction governing the liquid water content, compact C1 maximum.
     !>
-    !> \[ s_{eff} = \max_{\varepsilon}(s_m,s_f) = s_f + h(s_m-s_f) \]
-    !>
-    !> using the compact-support ramp h above (d(smax)/ds_m = h'(s_m-s_f),
-    !> d(smax)/ds_f = 1-h'(s_m-s_f)). Because h(d)=0 for d<=-eps_s and h(d)=d
-    !> for d>=eps_s, this is EXACTLY s_f when s_f>=s_m+eps_s and EXACTLY s_m
-    !> when s_f<=s_m-eps_s: no tail leaks outside the band |s_m-s_f|<eps_s, in
-    !> contrast to the hyperbolic form 0.5*(s_m+s_f+sqrt((s_m-s_f)^2+eps_s^2))
-    !> this replaced, which satisfies s_eff > max(s_m,s_f) at every finite
-    !> state - so ice (theta_i>0 iff s_eff>s_m) was measured nonzero at every
-    !> one of 2874 nodes of a fully unfrozen initial condition.
+    !> \[ s_{eff} = s_f + h(s_m-s_f) \]
     !>
     !> The matric suction s_m and the freezing-equivalent suction s_f are two
     !> constraints on the SAME liquid chemical potential, not two contributions
@@ -455,6 +378,9 @@ contains
     !> not conjugate and the equation has no reachable equilibrium: measured,
     !> that drove the pore to complete saturation within 1500 s against an
     !> experiment that redistributes over 50 h.
+    !> Within the narrow transition band, h shares the tangent continuously
+    !> between both constraints. Outside it, the value and tangent equal the
+    !> exact maximum, so warm states cannot acquire ice from an infinite tail.
     pure subroutine compute_effective_suction(psi_cap, psi_cryo, psi_eff, dpsi_eff_dpsi_cap, dpsi_eff_dpsi_cryo)
         implicit none
         real(real64), intent(in) :: psi_cap, psi_cryo
@@ -464,7 +390,15 @@ contains
         real(real64) :: difference, hp
 
         difference = psi_cap - psi_cryo
-        psi_eff = psi_cryo + smooth_ramp(difference)
+        if (difference <= -SUCTION_SMOOTHING) then
+            psi_eff = psi_cryo
+        else if (difference >= SUCTION_SMOOTHING) then
+            ! Assign the selected argument directly so "exact outside the
+            ! band" also holds bit for bit, without cancellation in a+(b-a).
+            psi_eff = psi_cap
+        else
+            psi_eff = psi_cryo + smooth_ramp(difference)
+        end if
 
         if (present(dpsi_eff_dpsi_cap) .or. present(dpsi_eff_dpsi_cryo)) then
             hp = smooth_ramp_deriv(difference)
@@ -472,37 +406,6 @@ contains
             if (present(dpsi_eff_dpsi_cryo)) dpsi_eff_dpsi_cryo = 1.0d0 - hp
         end if
     end subroutine compute_effective_suction
-
-    !> Smooth minimum of two suctions, used to blend the raw cryogenic suction
-    !> with the pore-volume-limit root (calc_limited_cryo_suction) without an
-    !> if/else activation switch.
-    !>
-    !> \[ s_{min} = \min_{\varepsilon}(a,b) = a - h(a-b) \]
-    !>
-    !> using the SAME compact-support ramp h as compute_effective_suction's
-    !> smooth maximum (d(smin)/da = 1-h'(a-b), d(smin)/db = h'(a-b)), so the
-    !> storage split's two switches share one width AND one compact band. This
-    !> is EXACTLY b when a>=b+eps_s and EXACTLY a when a<=b-eps_s: outside the
-    !> band |a-b|<eps_s the cut-off carries no residual tail (see
-    !> calc_limited_cryo_suction's BLEND_REACH comment, which relies on this).
-    !> As with the hyperbolic form this replaced, smin(a,b) <= min(a,b) always
-    !> (h(d) >= max(0,d) everywhere): the blend approaches the pore-volume
-    !> limit from BELOW, so the composition never violates the pore constraint
-    !> on its own account.
-    pure subroutine compute_smooth_min(a, b, smin, dsmin_da, dsmin_db)
-        implicit none
-        real(real64), intent(in) :: a, b
-        real(real64), intent(inout) :: smin, dsmin_da, dsmin_db
-
-        real(real64) :: d, hp
-
-        d = a - b
-        smin = a - smooth_ramp(d)
-        hp = smooth_ramp_deriv(d)
-
-        dsmin_da = 1.0d0 - hp
-        dsmin_db = hp
-    end subroutine compute_smooth_min
 
 
     !> Cryogenic suction the liquid actually feels, limited by the ice pressure.
@@ -525,49 +428,21 @@ contains
     !> f(psi) = theta_l + theta_i - phi increases with psi and is non-positive at
     !> psi = 0, so a root exists whenever the unlimited value would overfill.
     !>
-    !> The optional psi_star_out/needs_blend_out report the SAME root a step
-    !> earlier, before the constraint is fully active: whenever the root lies
-    !> within BLEND_REACH beyond psi_cryo, compute_smooth_min (used by
-    !> compute_blended_effective_suction) needs it to keep the blended suction
-    !> C^1 as the state approaches the limit, not only once past it. When the
-    !> root is farther than that, needs_blend_out is .false. and no caller
-    !> needs a blend - the raw suction is returned as psi_star_out unused.
-    subroutine calc_limited_cryo_suction(self, state, psi_cap, psi_cryo, psi_cryo_limited, is_limited, &
-                                         psi_star_out, needs_blend_out)
+    subroutine calc_limited_cryo_suction(self, state, psi_cap, psi_cryo, psi_cryo_limited, is_limited)
         implicit none
         class(type_fusion), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(in) :: psi_cap, psi_cryo
         real(real64), intent(inout) :: psi_cryo_limited
         logical, intent(inout) :: is_limited
-        real(real64), intent(inout), optional :: psi_star_out
-        logical, intent(inout), optional :: needs_blend_out
 
         integer(int32), parameter :: MAX_BISECTION = 60
-        ! Reach beyond the raw suction over which the limit root is searched
-        ! when the constraint is not yet active there. With the compact-
-        ! support ramp (smooth_ramp), compute_smooth_min(psi_cryo, psi_star)
-        ! reduces to psi_cryo EXACTLY once psi_star - psi_cryo >=
-        ! SUCTION_SMOOTHING (see compute_smooth_min's docstring): once
-        ! pore_excess is non-positive at psi_cryo + SUCTION_SMOOTHING, the true
-        ! (unlimited) root already lies far enough that skipping the blend
-        ! introduces NO residual discontinuity at all - unlike the hyperbolic
-        ! smooth-min this replaced, whose tail never actually reached the
-        ! corner at any finite separation, which is why that version needed a
-        ! wide reach (W=64) to keep the neglected tail below the line search's
-        ! resolution. The factor of 2 here is headroom against floating-point
-        ! round-off in pore_excess and the bisection below, not a smoothing-
-        ! tail bound: it no longer exists.
-        real(real64), parameter :: BLEND_REACH = 2.0d0 * SUCTION_SMOOTHING
         real(real64) :: porosity, rho_w, rho_i, density_ratio
         real(real64) :: theta_total, low, high, mid
-        real(real64) :: excess_raw
         integer(int32) :: k
 
         psi_cryo_limited = psi_cryo
         is_limited = .false.
-        if (present(psi_star_out)) psi_star_out = psi_cryo
-        if (present(needs_blend_out)) needs_blend_out = .false.
         if (psi_cryo <= 0.0d0) return
 
         call state%porosity%get(porosity)
@@ -579,19 +454,10 @@ contains
 
         call self%wrf%calc(-psi_cap / (rho_std * g), theta_total)
 
-        excess_raw = pore_excess(psi_cryo)
-        if (excess_raw > 0.0d0) then
-            is_limited = .true.
-            low = 0.0d0
-            high = psi_cryo
-        else if (pore_excess(psi_cryo + BLEND_REACH) > 0.0d0) then
-            ! Not active yet, but the root is within blending reach.
-            low = psi_cryo
-            high = psi_cryo + BLEND_REACH
-        else
-            ! The limit is far enough away that no blend is needed.
-            return
-        end if
+        if (pore_excess(psi_cryo) <= 0.0d0) return
+        is_limited = .true.
+        low = 0.0d0
+        high = psi_cryo
 
         do k = 1, MAX_BISECTION
             mid = 0.5d0 * (low + high)
@@ -602,9 +468,7 @@ contains
             end if
         end do
 
-        if (is_limited) psi_cryo_limited = low
-        if (present(psi_star_out)) psi_star_out = low
-        if (present(needs_blend_out)) needs_blend_out = .true.
+        psi_cryo_limited = low
 
     contains
 
@@ -628,44 +492,37 @@ contains
         end function pore_excess
     end subroutine calc_limited_cryo_suction
 
-    !> Blend the raw cryogenic suction with the pore-volume-limit root through
-    !> compute_smooth_min, then compose the result with the matric suction
-    !> through compute_effective_suction's smooth max: a single C^1 effective
-    !> suction and its (P,T) tangents, with no is_limited branch anywhere.
+    !> The pore-volume-limited effective suction and its (P,T) tangents.
     !>
-    !> \[ \psi_c = \min_\varepsilon(\psi_{raw},\psi^*), \qquad
-    !>    s_{eff} = \max_\varepsilon(s_m,\psi_c) \]
+    !> \[ \psi_c = \begin{cases} \psi_{raw} & \text{pore not full} \\
+    !>    \psi^* & \text{pore full (calc_limited_cryo_suction's root)}
+    !>    \end{cases}, \qquad s_{eff} = \max(s_m,\psi_c) \]
     !>
     !> This is the ONE routine calc_phase_split, calc_cryo_head_dT, and
     !> calc_effective_suction all go through, so their composition cannot
     !> diverge from each other.
     !>
-    !> Far from the pore limit (calc_limited_cryo_suction reports
-    !> needs_blend=.false.), psi_c = psi_raw exactly and d(psi_c)/dX reduces to
-    !> the raw GCC tangents dfreezing_dP/dT - reproducing the previous
-    !> unlimited formulas exactly. With the compact-support ramp underlying
-    !> compute_smooth_min, this is not an approximation: needs_blend=.false.
-    !> is only reported once the true pore-volume-limit root lies at least
-    !> SUCTION_SMOOTHING beyond psi_raw (see calc_limited_cryo_suction's
-    !> BLEND_REACH comment), and at that separation compute_smooth_min(psi_raw,
-    !> psi_star) returns psi_raw EXACTLY, with no neglected tail.
+    !> Away from the pore limit (calc_limited_cryo_suction reports
+    !> is_limited=.false.), psi_c = psi_raw exactly and d(psi_c)/dX is the raw
+    !> GCC tangent dfreezing_dP/dT.
     !>
-    !> When blending is needed, psi* moves with pressure through the active
-    !> pore-volume constraint
+    !> Once the constraint is active, psi_c = psi* moves with pressure through
     !>   E(s_m,p,psi*) = r*Theta(s_m) + (1-r)*theta_l(sigma(s_m,psi*)) - phi = 0,
     !> (r = rho_w/rho_i). Differentiating in p at fixed psi* (ds_m/dp = -1) and
     !> applying the implicit function theorem gives dpsi_star_dp = -dE_dp/dE_dpsi
-    !> below.
+    !> below - the exact tangent of the root calc_limited_cryo_suction returns.
     !>
     !> dpsi_star_dT is taken as zero: E's only T dependence is the density
-    !> ratio r(T,p), and the dropped term is ~1e-5 of the Clapeyron slope.
-    !> Deep in the limit (psi_raw >> psi*), compute_smooth_min's weights
-    !> saturate to dsmin_da -> 0, dsmin_db -> 1, so dpsi_c_dT -> 0 and
-    !> dpsi_c_dp -> dpsi_star_dp: the previous limited-branch formulas, and
-    !> with them d(theta_l+theta_i)/dp -> 0 (see calc_phase_split's docstring).
-    subroutine compute_blended_effective_suction(self, state, suction_matric, suction_freezing, &
-                                                 dfreezing_dP, dfreezing_dT, &
-                                                 suction_effective, dsuction_eff_dP, dsuction_eff_dT)
+    !> ratio r(T,p), and the dropped term is ~1e-5 of the Clapeyron slope (see
+    !> test_liquid_pressure_driver's tolerance note for the measured residual
+    !> this leaves).
+    !>
+    !> The switch between the two branches is a genuine kink in psi_c(s_m,p,T):
+    !> see compute_effective_suction's docstring for why nothing here smooths
+    !> across it.
+    subroutine compute_pore_limited_effective_suction(self, state, suction_matric, suction_freezing, &
+                                                       dfreezing_dP, dfreezing_dT, &
+                                                       suction_effective, dsuction_eff_dP, dsuction_eff_dT)
         implicit none
         class(type_fusion), intent(in) :: self
         type(type_state), intent(in) :: state
@@ -673,9 +530,9 @@ contains
         real(real64), intent(inout) :: suction_effective
         real(real64), intent(inout), optional :: dsuction_eff_dP, dsuction_eff_dT
 
-        real(real64) :: psi_cryo_limited_unused, psi_star
-        logical :: is_limited_unused, needs_blend
-        real(real64) :: psi_c, dsmin_da, dsmin_db, dpsi_c_dp, dpsi_c_dT
+        real(real64) :: psi_cryo_limited
+        logical :: is_limited
+        real(real64) :: psi_c, dpsi_c_dp, dpsi_c_dT
         real(real64) :: sig_a, sig_b, sig_a_star, sig_b_star, suction_eff_star
         real(real64) :: rho_w, rho_i, density_ratio
         real(real64) :: dtheta_dhead_matric, theta_prime_matric
@@ -696,17 +553,16 @@ contains
         end if
 
         call calc_limited_cryo_suction(self, state, suction_matric, suction_freezing, &
-                                       psi_cryo_limited_unused, is_limited_unused, &
-                                       psi_star, needs_blend)
+                                       psi_cryo_limited, is_limited)
 
-        if (.not. needs_blend) then
-            ! Far from the pore limit (or no limit reachable at all): reduces
-            ! exactly to the raw GCC suction and its raw tangents.
+        if (.not. is_limited) then
+            ! Pore not full: reduces exactly to the raw GCC suction and its
+            ! raw tangents.
             psi_c = suction_freezing
             dpsi_c_dp = dfreezing_dP
             dpsi_c_dT = dfreezing_dT
         else
-            call compute_smooth_min(suction_freezing, psi_star, psi_c, dsmin_da, dsmin_db)
+            psi_c = psi_cryo_limited
 
             ! Implicit-function-theorem tangent of the active pore-volume
             ! root E(s_m,p,psi*)=0 (see docstring above), evaluated at fixed T.
@@ -718,7 +574,7 @@ contains
             call self%wrf%deriv(-suction_matric / (rho_std * g), dtheta_dhead_matric)
             theta_prime_matric = -dtheta_dhead_matric / (rho_std * g)
 
-            call compute_effective_suction(suction_matric, psi_star, suction_eff_star, sig_a_star, sig_b_star)
+            call compute_effective_suction(suction_matric, psi_c, suction_eff_star, sig_a_star, sig_b_star)
             call self%wrf%deriv(-suction_eff_star / (rho_std * g), dtheta_dhead_star)
             theta_prime_star = -dtheta_dhead_star / (rho_std * g)
 
@@ -735,14 +591,14 @@ contains
                 dpsi_star_dp = 0.0d0
             end if
 
-            dpsi_c_dp = dsmin_da * dfreezing_dP + dsmin_db * dpsi_star_dp
-            dpsi_c_dT = dsmin_da * dfreezing_dT
+            dpsi_c_dp = dpsi_star_dp
+            dpsi_c_dT = 0.0d0
         end if
 
         call compute_effective_suction(suction_matric, psi_c, suction_effective, sig_a, sig_b)
         if (present(dsuction_eff_dP)) dsuction_eff_dP = -sig_a + sig_b * dpsi_c_dp
         if (present(dsuction_eff_dT)) dsuction_eff_dT = sig_b * dpsi_c_dT
-    end subroutine compute_blended_effective_suction
+    end subroutine compute_pore_limited_effective_suction
 
     !>
     !> @brief Initialize fusion model.
@@ -769,9 +625,9 @@ contains
     !>    \theta_w = \theta_{SWRC}(s_{eff}),\qquad
     !>    \theta_i = \frac{\rho_w}{\rho_i}\max(0,\Theta-\theta_w) \]
     !>
-    !> with \( s_m = p_a - p_w \) and \( s_{eff} = \max(s_m, s_f) \). Freezing
-    !> does not change the conserved water at a node, it only moves it between
-    !> the phases, so
+    !> with \(s_m=p_a-p_w\) and a compact C1 regularization of
+    !> \(s_{eff}=\max(s_m,s_f)\). Freezing does not change the conserved water
+    !> at a node, it only moves it between the phases, so
     !> \( \Theta = \theta_w + (\rho_i/\rho_w)\theta_i \) holds identically and
     !> \( \partial\Theta/\partial T = 0 \): temperature changes the split, not
     !> the sum. The storage tangent \( \partial\Theta/\partial p_w \) therefore
@@ -782,22 +638,22 @@ contains
     !> of the mass balance; the relation enters only through s_f, which sets how
     !> much liquid the temperature permits.
     !>
-    !> Pore-volume limit: the raw Clapeyron suction s_f is blended with
-    !> calc_limited_cryo_suction's limit root through compute_smooth_min, and
-    !> s_eff = sigma(s_m, blend) through the SAME smooth max used elsewhere -
-    !> all inside compute_blended_effective_suction, with no is_limited
-    !> if/else. Far from the limit this reduces exactly to s_eff=sigma(s_m,s_f)
-    !> and the raw tangents. Deep in the limit, on the active constraint
-    !> r*Theta+(1-r)*theta_l=phi (r=rho_w/rho_i), the blend's weights saturate
-    !> and the implicit function theorem gives the branch's tangents (T does
-    !> not appear explicitly in the constraint):
-    !>   dtheta_l/dp -> r/(r-1) dTheta/dp,     dtheta_l/dT -> 0.
+    !> Pore-volume limit: the raw Clapeyron suction s_f is replaced, once the
+    !> pore-volume constraint is active, by calc_limited_cryo_suction's exact
+    !> limit root, then composed with s_m through the same compact C1 maximum
+    !> used elsewhere. The pore-limit activation itself remains an exact
+    !> is_limited branch. Outside the suction transition band, the off-limit
+    !> state is exactly s_eff=max(s_m,s_f) with the raw tangents. On the active
+    !> constraint r*Theta+(1-r)*theta_l=phi (r=rho_w/rho_i), the implicit
+    !> function theorem gives the branch's tangents (T does not appear
+    !> explicitly in the constraint):
+    !>   dtheta_l/dp = r/(r-1) dTheta/dp,     dtheta_l/dT = 0.
     !> These feed the same complement formulas used off the constraint, so
-    !> dtheta_i/dp -> -r/(r-1) dTheta/dp and dtheta_i/dT -> 0 fall out below
-    !> without a separate branch: d(theta_l+theta_i)/dp -> 0, i.e. the pore
-    !> approaches staying full while a pressure change only moves water
-    !> between the phases that are already there (see
-    !> compute_blended_effective_suction's docstring for both limits).
+    !> dtheta_i/dp = -r/(r-1) dTheta/dp and dtheta_i/dT = 0 fall out below
+    !> without a separate branch: d(theta_l+theta_i)/dp = 0, i.e. the pore
+    !> stays exactly full while a pressure change only moves water between the
+    !> phases that are already there (see
+    !> compute_pore_limited_effective_suction's docstring for both branches).
     subroutine calc_phase_split(self, state, total_water, theta_liquid, theta_ice, &
                                 dliquid_dP, dliquid_dT, dice_dP, dice_dT, dtotal_dP, dtotal_dT, &
                                 suction_effective_out, dsuction_eff_dP_out, dsuction_eff_dT_out)
@@ -854,14 +710,14 @@ contains
             return
         end if
 
-        ! Blend the raw cryogenic suction with the pore-volume-limit root
-        ! (compute_blended_effective_suction), then compose with the matric
-        ! suction through the same smooth max used elsewhere. No is_limited
-        ! branch: see that routine's docstring for the far-limit and
-        ! deep-limit reductions.
-        ! One composition for every consumer (see compute_blended_effective_
-        ! suction); with PORE_LIMIT_EXPELS_WATER it returns the unpinned form.
-        call compute_blended_effective_suction(self, state, suction_matric, suction_freezing, &
+        ! Apply the pore-volume limit to the raw cryogenic suction
+        ! (compute_pore_limited_effective_suction), then compose with the
+        ! matric suction through the same compact C1 maximum used elsewhere; see that
+        ! routine's docstring for the off-limit and active-limit branches.
+        ! One composition for every consumer (see
+        ! compute_pore_limited_effective_suction); with PORE_LIMIT_EXPELS_WATER
+        ! it returns the unpinned form.
+        call compute_pore_limited_effective_suction(self, state, suction_matric, suction_freezing, &
                                                dfreezing_dP, dfreezing_dT, &
                                                suction_effective, dsuction_eff_dP, dsuction_eff_dT)
 
@@ -882,20 +738,18 @@ contains
         if (.not. pore_expels) then
             theta_ice = theta_ice_unconstrained
         else
-            ! Remove the pore overfill smoothly rather than switching closures at
-            ! the crossing: a hard branch leaves theta_i continuous but its
-            ! tangent discontinuous, and the element finite-difference tangent
-            ! this residual feeds is documented to need a C^1 residual.
+            ! Remove the pore overfill exactly:
             !
             !   e      = theta_l + theta_i_unconstrained - phi
-            !   theta_i = theta_i_unconstrained - h(e)
+            !   theta_i = theta_i_unconstrained - max(0,e)
             !
-            ! h is the same compact-support C^1 ramp used for the suction
-            ! composition, so below the limit the split is EXACTLY the
-            ! unconstrained one and above it theta_i is EXACTLY phi - theta_l.
+            ! Below the limit the split is the unconstrained one and above it
+            ! theta_i is exactly phi - theta_l, with the tangent switching at
+            ! the crossing rather than ramping across a band.
             pore_excess_value = theta_liquid + theta_ice_unconstrained - porosity_limit
-            theta_ice = theta_ice_unconstrained - ramp_band(pore_excess_value, PORE_EXCESS_SMOOTHING)
-            pore_excess_slope = ramp_band_deriv(pore_excess_value, PORE_EXCESS_SMOOTHING)
+            theta_ice = theta_ice_unconstrained - max(0.0d0, pore_excess_value)
+            pore_excess_slope = 0.0d0
+            if (pore_excess_value > 0.0d0) pore_excess_slope = 1.0d0
             ! Theta_store = theta_l + alpha*theta_i reproduces the retention
             ! total exactly where the cap is inactive, so one expression covers
             ! both regimes.
@@ -972,10 +826,9 @@ contains
         if (present(dliquid_dT)) dliquid_dT = dliquid_dtemperature
         ! Ice takes the complement, so that dQw + (rho_i/rho_w) dQi reproduces
         ! dTheta exactly and the assembled storage tangent is the retention
-        ! one. Deep in the pore-volume limit this is also what makes
-        ! d(theta_l+theta_i)/dp approach zero (see compute_blended_effective_
-        ! suction's docstring): the smooth composition approaches, but unlike
-        ! the old hard switch does not reach exactly, that cancellation.
+        ! one. On the active pore-volume limit this is also what makes
+        ! d(theta_l+theta_i)/dp equal zero exactly (see
+        ! compute_pore_limited_effective_suction's docstring).
         !
         ! The ratio r = rho_w/rho_i is itself a state function (IAPWS ice
         ! density varies with T and p), so differentiating theta_i = r*(Theta -
@@ -1259,14 +1112,14 @@ contains
         ! cryogenic suction psi_cryo(T) lowers the unfrozen content, which is
         ! what makes theta_l temperature-dependent and supplies the apparent
         ! heat capacity to the energy equation.
-        ! Through compute_blended_effective_suction, not the limiter directly:
+        ! Through compute_pore_limited_effective_suction, not the limiter directly:
         ! it is the one routine that decides whether the pore-volume root pins
         ! the suction, so calling the limiter here left the saturation test
         ! (calc_saturation_pressure -> here) on the old closure while the split
         ! had moved to the new one.
         call calc_freezing_suction(self, state, psi_cryo, &
                                    dfreezing_dP=dpsi_cryo_dP, dfreezing_dT=dpsi_cryo_dT)
-        call compute_blended_effective_suction(self, state, psi_cap, psi_cryo, &
+        call compute_pore_limited_effective_suction(self, state, psi_cap, psi_cryo, &
                                                dpsi_cryo_dP, dpsi_cryo_dT, psi_eff)
         call self%wrf%calc(-psi_eff / (rho_std * g), water_content)
 
@@ -1324,14 +1177,14 @@ contains
     !> This derivative belongs to the phase-storage relation. It is not the
     !> thermal liquid conductivity in the hydraulic flux.
     !>
-    !> Goes through the same compute_blended_effective_suction as
-    !> calc_phase_split and calc_effective_suction, so there is no is_limited
-    !> branch here either. Far from the pore-volume limit this reduces to the
-    !> raw d(psi_eff)/dT below. Deep in the limit compute_smooth_min's weight
-    !> on the raw suction saturates to zero, so d(s_eff)/dT -> 0 smoothly: the
+    !> Goes through the same compute_pore_limited_effective_suction as
+    !> calc_phase_split and calc_effective_suction, so the is_limited branch
+    !> is consistent everywhere. Off the pore-volume limit this reduces to the
+    !> raw d(psi_eff)/dT below. On the active constraint, d(s_eff)/dT = 0
+    !> exactly (see compute_pore_limited_effective_suction's docstring): the
     !> feedback that stops the freezing front from pulling in more water once
-    !> the pore is full, now continuous instead of a hard drop. This tangent
-    !> feeds K_TT/K_HT (ftcms_assemble.F90's transform_to_total_potential).
+    !> the pore is full. This tangent feeds K_TT/K_HT
+    !> (ftcms_assemble.F90's transform_to_total_potential).
     subroutine calc_cryo_head_dT(self, state, dh_dT)
         implicit none
         class(type_fusion), intent(in) :: self
@@ -1348,7 +1201,7 @@ contains
         call calc_freezing_suction(self, state, psi_cryo, &
                                    dfreezing_dP=d_psi_cryo_dP, dfreezing_dT=d_psi_cryo_dT)
 
-        call compute_blended_effective_suction(self, state, psi_cap, psi_cryo, d_psi_cryo_dP, d_psi_cryo_dT, &
+        call compute_pore_limited_effective_suction(self, state, psi_cap, psi_cryo, d_psi_cryo_dP, d_psi_cryo_dT, &
                                                suction_effective, dsuction_eff_dP, dsuction_eff_dT)
 
         dh_dT = -dsuction_eff_dT / (rho_std * g)
@@ -1361,7 +1214,7 @@ contains
     !> phase storage. psi_cap is clamped at zero here, unclamped in
     !> calc_phase_split, so the assembly reads the published state value.
     !>
-    !> Published through the SAME compute_blended_effective_suction as
+    !> Published through the SAME compute_pore_limited_effective_suction as
     !> calc_phase_split and calc_cryo_head_dT, so the reported suction cannot
     !> diverge from what those routines actually used.
     subroutine calc_effective_suction(self, state, psi_eff)
@@ -1376,34 +1229,32 @@ contains
         psi_cap = max(0.0d0, -pressure)
         call calc_freezing_suction(self, state, psi_cryo, &
                                    dfreezing_dP=d_psi_cryo_dP, dfreezing_dT=d_psi_cryo_dT)
-        call compute_blended_effective_suction(self, state, psi_cap, psi_cryo, d_psi_cryo_dP, d_psi_cryo_dT, psi_eff)
+        call compute_pore_limited_effective_suction(self, state, psi_cap, psi_cryo, d_psi_cryo_dP, d_psi_cryo_dT, psi_eff)
     end subroutine calc_effective_suction
 
     !> Freezing-interface level set consistent with calc_phase_split's own
     !> ice-existence switch.
     !>
-    !> \[ \phi = (s_f - s_m) + \varepsilon_s, \qquad s_m = -p_w, \qquad
+    !> \[ \phi = (s_f - s_m)+\varepsilon_s, \qquad s_m = -p_w, \qquad
     !>    s_f = \Psi_{ice}^{GCC}(T,p_w) \]
     !>
     !> Ice exists, \(\theta_i>0\), iff \(s_{eff}>s_m\) (calc_phase_split), and
-    !> with the compact-support smooth max (compute_effective_suction's
-    !> smooth_ramp) that holds exactly iff \(s_f>s_m-\varepsilon_s\), i.e.
-    !> \(\phi>0\); \(\phi=0\) is exactly ice onset and \(\phi\le0\) is exactly
-    !> ice-free. This is the freezing-interface level set
-    !> hydraulic_matrix.F90) should cut elements on, in place of a separately
-    !> defined critical temperature: computing it here, from the SAME s_m,s_f
-    !> calc_phase_split forms, is what keeps the "cut" elements from drifting
-    !> away from where the constitutive split actually places the phase
-    !> change.
+    !> with the compact C1 maximum that holds exactly iff
+    !> \(s_f>s_m-\varepsilon_s\), i.e. \(\phi>0\); \(\phi=0\) is ice onset and
+    !> \(\phi\le0\) is ice-free. This is the freezing-interface level
+    !> set hydraulic_matrix.F90) should cut elements on, in place of a
+    !> separately defined critical temperature: computing it here, from the
+    !> SAME s_m,s_f calc_phase_split forms, is what keeps the "cut" elements
+    !> from drifting away from where the constitutive split actually places
+    !> the phase change.
     !>
     !> s_f is the RAW generalized-Clapeyron suction (self%gcc%calc), the same
-    !> suction_freezing calc_phase_split forms before any pore-volume
-    !> blending - not the blended/limited suction
-    !> compute_blended_effective_suction can return under an active
-    !> pore-volume constraint. Away from pore saturation
-    !> (calc_limited_cryo_suction's needs_blend=.false., the ordinary case)
-    !> the two coincide exactly; only near saturation can this level set lag
-    !> the blended split by the (small) blend correction.
+    !> suction_freezing calc_phase_split forms before any pore-volume limit -
+    !> not the limited suction compute_pore_limited_effective_suction can
+    !> return under an active pore-volume constraint. Away from pore
+    !> saturation (calc_limited_cryo_suction's is_limited=.false., the
+    !> ordinary case) the two coincide exactly; only once the pore is full can
+    !> this level set lag the limited split.
     !>
     !> Numerical guarantee: exact given exact s_m, s_f (no further
     !> approximation is introduced).

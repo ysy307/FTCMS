@@ -32,6 +32,17 @@ EXPERIMENTAL_DATA = {
     0.20: [0.350, 0.340, 0.330, 0.280],
 }
 TIME_INDEX = {0: 0, 12: 1, 24: 2, 50: 3}
+# What EXPERIMENTAL_DATA is, recorded with every result so that a measurement
+# against the experiment is never confused with a regression comparison against
+# a previous run of this code. The origin of the table is stated as it is known:
+# no raw data file, digitisation script or citation exists in this repository.
+EXPERIMENTAL_REFERENCE = {
+    "kind": "experiment",
+    "name": "Mizoguchi (1990) freezing-column total water content",
+    "columns_hours": sorted(TIME_INDEX),
+    "provenance": "unverified: hard-coded table in Mizo_theta.py; no raw data, "
+                  "digitisation record or citation is present in this repository",
+}
 ICE_TO_WATER_VOLUME_RATIO = 917.0 / 1000.0
 DZ_DEFAULT = 0.01
 
@@ -59,8 +70,31 @@ def _output_interval_minutes(vtu_dir):
     )
 
 
+def _initial_condition(output_dir):
+    """The run's initial hydraulic and thermal state, for the result record.
+
+    Two archived runs of this problem differ only in their uniform initial
+    pressure, and their metrics differ accordingly. Carrying the initial
+    condition into every result makes it impossible to compare one against the
+    other's baseline by accident.
+    """
+    for parent in [Path(output_dir).resolve(), *Path(output_dir).resolve().parents]:
+        candidate = parent / "Input" / "Conditions.json"
+        if not candidate.is_file():
+            continue
+        initial = json.loads(candidate.read_text()).get("initial_conditions", {})
+        record = {"conditions_file": str(candidate)}
+        for key, label in (("hydraulic", "initial_pressure_Pa"),
+                           ("thermal", "initial_temperature_C")):
+            entry = initial.get(key, {})
+            if entry.get("type") == "uniform" and "value" in entry:
+                record[label] = float(entry["value"])
+        return record
+    return {"conditions_file": None}
+
+
 # Cell types by the number of corners a cell has, for the two spatial
-# dimensions the solver writes. The file records only the corner indices, so the
+# dimensions the solver writes. The HDF5 records only the corner indices, so the
 # element is identified by how many of them there are.
 _CELL_TYPES = {
     (2, 3): pv.CellType.TRIANGLE,
@@ -69,40 +103,200 @@ _CELL_TYPES = {
     (3, 8): pv.CellType.HEXAHEDRON,
 }
 
+SNAPSHOT_FORMATS = ("auto", "vtu", "hdf5")
+_REQUIRED_FIELDS = ("WaterContent", "IceContent")
 
-def _h5_path(output_dir):
-    """The single HDF5 a run writes, searched for under the output directory."""
-    output_dir = Path(output_dir)
-    matches = sorted(set(output_dir.glob("*.h5")) | set(output_dir.glob("Files/*.h5")))
-    if len(matches) != 1:
-        raise FileNotFoundError(
-            f"Expected exactly one HDF5 output under {output_dir}, found {len(matches)}"
+
+class SnapshotError(ValueError):
+    """A snapshot could not be selected, located, or read.
+
+    Every selection and availability failure is raised as this one type so that
+    a missing time is reported as a failed evaluation and never as an empty but
+    successful result.
+    """
+
+
+def _vtu_snapshots(output_dir):
+    """Output index to file, for the one-file-per-step ``Out_NNN.vtu`` layout."""
+    found = {}
+    for directory in (output_dir, output_dir / "Files"):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("Out_*.vtu")):
+            try:
+                index = int(path.stem.removeprefix("Out_"))
+            except ValueError:
+                continue
+            if index in found:
+                raise SnapshotError(
+                    f"Ambiguous VTU output index {index}: {found[index]} and {path}"
+                )
+            found[index] = path
+    return found
+
+
+def _hdf5_files(output_dir):
+    """Every HDF5 under the output directory, in the single-file layout."""
+    matches = set()
+    for directory in (output_dir, output_dir / "Files"):
+        if directory.is_dir():
+            matches |= set(directory.glob("*.h5"))
+    return sorted(matches)
+
+
+def _hdf5_snapshot_count(path):
+    with h5py.File(path, "r") as handle:
+        counts = {
+            handle[f"fields/{name}"].shape[0]
+            for name in _REQUIRED_FIELDS
+            if f"fields/{name}" in handle
+        }
+    if not counts:
+        raise SnapshotError(f"None of {', '.join(_REQUIRED_FIELDS)} found in {path}")
+    return min(counts)
+
+
+class SnapshotSource:
+    """One run's field output, whichever of the two layouts wrote it.
+
+    The archived runs wrote one VTU per output step; the PetscDS path writes a
+    single time-indexed HDF5. Reading is the only stage that depends on which:
+    `read_grid` returns the same unstructured grid carrying the same point
+    fields either way, so the resampling, the depth bins and every metric
+    downstream are shared code and the two paths stay comparable.
+    """
+
+    def __init__(self, fmt, output_dir, vtu_snapshots=None, h5_path=None, h5_count=0):
+        self.format = fmt
+        self.output_dir = Path(output_dir)
+        self._vtu = dict(vtu_snapshots or {})
+        self._h5_path = h5_path
+        self._h5_count = h5_count
+
+    # ---- Inquiry ----
+    def available_indices(self):
+        if self.format == "vtu":
+            return sorted(self._vtu)
+        return list(range(self._h5_count))
+
+    def snapshot_count(self):
+        return len(self._vtu) if self.format == "vtu" else self._h5_count
+
+    # ---- Getter ----
+    def snapshot_path(self, index):
+        if self.format == "vtu":
+            return self._vtu.get(index)
+        return self._h5_path
+
+    def describe(self, index=None):
+        """Provenance of the data a result was measured from."""
+        record = {
+            "format": self.format,
+            "output_dir": str(self.output_dir),
+            "snapshot_count": self.snapshot_count(),
+        }
+        if index is not None:
+            path = self.snapshot_path(index)
+            record["snapshot_index"] = index
+            record["snapshot_path"] = None if path is None else str(path)
+        return record
+
+    # ---- Algorithm ----
+    def read_grid(self, index):
+        """The mesh and the total-water fields of one output index."""
+        if self.format == "vtu":
+            path = self._vtu.get(index)
+            if path is None:
+                indices = self.available_indices()
+                span = f"{indices[0]}..{indices[-1]}" if indices else "none"
+                raise SnapshotError(
+                    f"No VTU output at index {index} under {self.output_dir}; "
+                    f"{len(indices)} snapshots present ({span})"
+                )
+            return _read_vtu_grid(path)
+        if index >= self._h5_count:
+            raise SnapshotError(
+                f"{self._h5_path} holds {self._h5_count} output times, "
+                f"none at index {index}"
+            )
+        return _read_hdf5_grid(self._h5_path, index)
+
+
+def resolve_snapshot_source(output_dir, snapshot_format="auto"):
+    """Select the field output of a run, unambiguously.
+
+    `auto` resolves only when exactly one of the two layouts is present; a
+    directory holding both is an error naming `--snapshot_format`, because
+    guessing there would silently measure whichever run happened to be picked.
+    """
+    if snapshot_format not in SNAPSHOT_FORMATS:
+        raise SnapshotError(
+            f"Unknown snapshot format {snapshot_format!r}; "
+            f"expected one of {', '.join(SNAPSHOT_FORMATS)}"
         )
-    return matches[0]
+    output_dir = Path(output_dir)
+    if not output_dir.is_dir():
+        raise SnapshotError(f"Output directory {output_dir} does not exist")
+
+    vtu = _vtu_snapshots(output_dir) if snapshot_format in ("auto", "vtu") else {}
+    h5 = _hdf5_files(output_dir) if snapshot_format in ("auto", "hdf5") else []
+
+    if snapshot_format == "auto":
+        if vtu and h5:
+            raise SnapshotError(
+                f"{output_dir} holds both {len(vtu)} Out_*.vtu snapshots and "
+                f"{len(h5)} HDF5 file(s); pass --snapshot_format vtu or hdf5"
+            )
+        if not vtu and not h5:
+            raise SnapshotError(
+                f"No Out_*.vtu and no *.h5 field output under {output_dir}"
+            )
+        snapshot_format = "vtu" if vtu else "hdf5"
+
+    if snapshot_format == "vtu":
+        if not vtu:
+            raise SnapshotError(f"No Out_*.vtu field output under {output_dir}")
+        return SnapshotSource("vtu", output_dir, vtu_snapshots=vtu)
+
+    if len(h5) != 1:
+        raise SnapshotError(
+            f"Expected exactly one HDF5 output under {output_dir}, found {len(h5)}"
+        )
+    return SnapshotSource(
+        "hdf5", output_dir, h5_path=h5[0], h5_count=_hdf5_snapshot_count(h5[0])
+    )
 
 
 def _timestep_index(time_hours, output_interval_minutes):
     return round(time_hours * 60.0 / output_interval_minutes)
 
 
-def _read_grid(path, index):
-    """The mesh and the fields of one output time, as an unstructured grid.
+def _read_vtu_grid(path):
+    """One archived output step, as an unstructured grid."""
+    grid = pv.read(path)
+    for name in _REQUIRED_FIELDS:
+        if name not in grid.point_data and name not in grid.cell_data:
+            raise SnapshotError(f"{name} not found in {path}")
+    return grid
 
-    A run writes one self-contained HDF5: the vertices, the corner indices of
-    every cell, and one dataset per quantity indexed by output time. The grid is
-    assembled here so that everything downstream -- the resampling, the depth
-    bins, the metrics -- is the same code whatever wrote the file.
+
+def _read_hdf5_grid(path, index):
+    """One output time of the single time-indexed HDF5, as an unstructured grid.
+
+    The file holds the vertices, the corner indices of every cell, and one
+    dataset per quantity indexed by output time; the grid is assembled here so
+    that it is interchangeable with an archived VTU step downstream.
     """
     with h5py.File(path, "r") as handle:
         points = np.asarray(handle["geometry/vertices"])
         cells = np.asarray(handle["viz/topology/cells"])
         fields = {}
-        for name in ("WaterContent", "IceContent"):
+        for name in _REQUIRED_FIELDS:
             if f"fields/{name}" not in handle:
-                raise ValueError(f"{name} not found in {path}")
+                raise SnapshotError(f"{name} not found in {path}")
             data = handle[f"fields/{name}"]
             if index >= data.shape[0]:
-                raise FileNotFoundError(
+                raise SnapshotError(
                     f"{path} holds {data.shape[0]} output times, none at index {index}"
                 )
             fields[name] = np.asarray(data[index]).reshape(data.shape[1], -1)[:, 0]
@@ -116,7 +310,7 @@ def _read_grid(path, index):
     corners = cells.shape[1]
     cell_type = _CELL_TYPES.get((varying, corners))
     if cell_type is None:
-        raise ValueError(
+        raise SnapshotError(
             f"No cell type for {corners} corners in {varying} dimensions in {path}"
         )
 
@@ -131,9 +325,19 @@ def _read_grid(path, index):
 
 
 def _sample_total_water(grid, resolution):
-    water = np.asarray(grid.point_data["WaterContent"])
-    ice = np.asarray(grid.point_data["IceContent"])
-    grid.point_data["theta_tot"] = water + ICE_TO_WATER_VOLUME_RATIO * ice
+    # The archived VTU may carry the fields per cell rather than per point; the
+    # total is formed wherever they live and resampled the same way after that.
+    if all(name in grid.point_data for name in _REQUIRED_FIELDS):
+        store = grid.point_data
+    elif all(name in grid.cell_data for name in _REQUIRED_FIELDS):
+        store = grid.cell_data
+    else:
+        raise SnapshotError(
+            f"{' and '.join(_REQUIRED_FIELDS)} not found together in the output grid"
+        )
+    water = np.asarray(store["WaterContent"])
+    ice = np.asarray(store["IceContent"])
+    store["theta_tot"] = water + ICE_TO_WATER_VOLUME_RATIO * ice
 
     x_min, x_max, y_min, y_max, z_min, z_max = grid.bounds
     nx = max(2, int(np.ceil((x_max - x_min) / resolution)) + 1)
@@ -303,14 +507,14 @@ def _experimental_changes(time_hours):
     return [values[idx] - values[idx0] for values in EXPERIMENTAL_DATA.values()]
 
 
-def _sampling_sensitivity(vtu_dir, time_hours, dz, res, interval_minutes):
+def _sampling_sensitivity(source, time_hours, dz, res, interval_minutes):
     """Largest bin-mean difference between res and res/2 sampling.
 
     The depth bins are 10 mm and the sampling grid is 1 mm, so a bin mean should
     not depend on the grid. If it does, the reported profile is a sampling
     artefact rather than a result.
     """
-    grid = _read_grid(_h5_path(vtu_dir), _timestep_index(time_hours, interval_minutes))
+    grid = source.read_grid(_timestep_index(time_hours, interval_minutes))
     coarse = _depth_profile(*_sample_total_water(grid, res), time_hours, dz)
     fine = _depth_profile(*_sample_total_water(grid, 0.5 * res), time_hours, dz)
     deltas = [
@@ -391,7 +595,7 @@ def _solver_metrics(path):
 
 
 def calculate_theta_error_high_precision(
-    vtu_base_dir,
+    source,
     target_time_hours,
     dz=0.01,
     res=0.001,
@@ -399,10 +603,10 @@ def calculate_theta_error_high_precision(
 ):
     if target_time_hours not in TIME_INDEX:
         raise ValueError(f"Invalid time: {target_time_hours} h")
-    target_grid = _read_grid(
-        _h5_path(vtu_base_dir),
-        _timestep_index(target_time_hours, output_interval_minutes),
-    )
+    if not isinstance(source, SnapshotSource):
+        source = resolve_snapshot_source(source)
+    target_index = _timestep_index(target_time_hours, output_interval_minutes)
+    target_grid = source.read_grid(target_index)
     depths, theta = _sample_total_water(target_grid, res)
     rows = _depth_profile(depths, theta, target_time_hours, dz)
 
@@ -415,7 +619,12 @@ def calculate_theta_error_high_precision(
         f"bias={metrics['bias']:+.6f}, max|error|={metrics['max_abs_error']:.6f}"
     )
 
-    result = {"time_hours": target_time_hours, "profile": rows, "profile_metrics": metrics}
+    result = {
+        "time_hours": target_time_hours,
+        "snapshot": source.describe(target_index),
+        "profile": rows,
+        "profile_metrics": metrics,
+    }
 
     skill = _skill_score(rows)
     result["skill_vs_no_redistribution"] = skill
@@ -423,9 +632,7 @@ def calculate_theta_error_high_precision(
         print(f"Skill vs no-redistribution reference: {skill:+.4f}")
 
     if target_time_hours > 0:
-        initial_grid = _read_grid(
-            _h5_path(vtu_base_dir), _timestep_index(0, output_interval_minutes)
-        )
+        initial_grid = source.read_grid(_timestep_index(0, output_interval_minutes))
         initial_depths, initial_theta = _sample_total_water(initial_grid, res)
         initial_rows = _depth_profile(initial_depths, initial_theta, 0, dz)
         redistribution = _redistribution_metrics(initial_rows, rows, dz)
@@ -465,6 +672,24 @@ def calculate_theta_error_high_precision(
             f"{redistribution['upper_gain_fraction_of_experiment']:.3f}"
         )
     return result
+
+
+def _result_payload(results, failures, source, initial_condition):
+    """The record of one evaluation, with what it was measured from.
+
+    A single evaluated time keeps the flat shape the baseline record and
+    `mizo_compare.py` read. Whatever the shape, the payload always carries the
+    output it came from, the initial condition of that run, and any failure --
+    so a file that evaluated nothing cannot be mistaken for a clean result.
+    """
+    payload = dict(results[0]) if len(results) == 1 else {"times": results}
+    payload["evaluated_times"] = [result["time_hours"] for result in results]
+    payload["source"] = source.describe()
+    payload["initial_condition"] = initial_condition
+    payload["experimental_reference"] = dict(EXPERIMENTAL_REFERENCE)
+    if failures:
+        payload["failures"] = list(failures)
+    return payload
 
 
 def _gate_failures(result, time_hours, solver, args):
@@ -536,7 +761,14 @@ def _gate_failures(result, time_hours, solver, args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--vtu_dir", type=Path, required=True)
+    parser.add_argument("--vtu_dir", type=Path, required=True,
+                        help="Output directory holding Out_*.vtu or a single *.h5")
+    parser.add_argument(
+        "--snapshot_format",
+        choices=SNAPSHOT_FORMATS,
+        default="auto",
+        help="Field-output layout to read; 'auto' fails if both are present",
+    )
     parser.add_argument(
         "--time",
         required=True,
@@ -583,6 +815,27 @@ def main():
         interval_minutes = _output_interval_minutes(args.vtu_dir)
         print(f"Output interval from Input/Output.json: {interval_minutes:g} min")
 
+    try:
+        source = resolve_snapshot_source(args.vtu_dir, args.snapshot_format)
+    except SnapshotError as error:
+        print(f"CHECK FAILED: no evaluable field output: {error}")
+        raise SystemExit(1)
+    initial_condition = _initial_condition(args.vtu_dir)
+    print(
+        f"Source: {source.format} output, {source.snapshot_count()} snapshots "
+        f"under {source.output_dir}"
+    )
+    if initial_condition.get("initial_pressure_Pa") is not None:
+        print(
+            "Initial condition: uniform pressure "
+            f"{initial_condition['initial_pressure_Pa']:.4f} Pa"
+            + (
+                ""
+                if initial_condition.get("initial_temperature_C") is None
+                else f", uniform temperature {initial_condition['initial_temperature_C']:g} C"
+            )
+        )
+
     history_path = args.solver_history
     if history_path is None:
         candidate = args.vtu_dir.parent / "solver_history.log"
@@ -608,7 +861,7 @@ def main():
         # everything the run did produce.
         try:
             result = calculate_theta_error_high_precision(
-                args.vtu_dir,
+                source,
                 target_time,
                 res=args.res,
                 output_interval_minutes=interval_minutes,
@@ -621,7 +874,7 @@ def main():
 
         if args.sampling_sensitivity:
             sensitivity = _sampling_sensitivity(
-                args.vtu_dir, target_time, DZ_DEFAULT, args.res, interval_minutes
+                source, target_time, DZ_DEFAULT, args.res, interval_minutes
             )
             result["sampling_sensitivity"] = sensitivity
             difference = sensitivity["max_abs_bin_difference"]
@@ -664,7 +917,7 @@ def main():
         print()
 
     if args.json_output is not None:
-        payload = results[0] if len(results) == 1 else {"times": results}
+        payload = _result_payload(results, failures, source, initial_condition)
         args.json_output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     if failures:
         for failure in failures:
