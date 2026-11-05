@@ -187,13 +187,15 @@ contains
 
     end subroutine calc_specific_heat
 
-    subroutine calc_thermal_conductivity_nondispersivity(self, state, lambda)
+    subroutine calc_thermal_conductivity_nondispersivity(self, state, lambda, tangent)
         implicit none
         class(type_material_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: lambda
+        !> \((\partial\lambda/\partial p_w,\partial\lambda/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
-        call self%thc%p%calc(state, lambda)
+        call self%thc%p%calc(state, lambda, tangent)
 
     end subroutine calc_thermal_conductivity_nondispersivity
 

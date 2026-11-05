@@ -1,37 +1,21 @@
 program main
-    use, intrinsic :: iso_fortran_env, only: int32, real64
-#ifdef _MPI
-    use :: core_parallel_mpi
-#endif
+    use, intrinsic :: iso_fortran_env, only: int32
+    use :: petscsys, only:PetscInitialize, PetscFinalize
     use :: module_ftcms
 
     implicit none
 
     integer(int32) :: ierr
-    integer(int32) :: myrank
+    type(type_ftcms) :: ftcms
 
-#ifdef _MPI
-    call MPI_Init(ierr)
-    call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
-#endif
+    ! PETSc starts and stops MPI for the whole run.
+    call PetscInitialize(ierr)
+    if (ierr /= 0) error stop "PETSc could not be initialised"
 
-    ! Call test function
-    call run_test_ftcms()
+    call ftcms%initialize()
+    call ftcms%run()
+    call ftcms%destroy()
 
-#ifdef _MPI
-    call MPI_Finalize(ierr)
-#endif
-
-contains
-
-    subroutine run_test_ftcms()
-        implicit none
-        type(type_ftcms) :: ftcms
-
-        call ftcms%initialize()
-        call ftcms%run()
-        call ftcms%destroy()
-
-    end subroutine run_test_ftcms
+    call PetscFinalize(ierr)
 
 end program main

@@ -26,6 +26,8 @@ module physics_governing_boundary_manager
         procedure, public, pass(self) :: evaluate_bcs => evaluate_bcs_manager
         procedure, public, pass(self) :: get_num_boundaries => get_num_boundaries_bc_manager
         procedure, public, pass(self) :: get_bc_index => get_bc_index_bc_manager
+        procedure, public, pass(self) :: get_boundary_id => get_boundary_id_bc_manager
+        procedure, public, pass(self) :: get_data => get_data_bc_manager
         procedure, public, pass(self) :: update_bc_data => update_bc_data_manager
     end type type_bc_manager
 
@@ -157,5 +159,26 @@ contains
             end if
         end do
     end subroutine get_bc_index_bc_manager
+
+    !> The provider data of the condition at index `bc_index`, at `current_time`.
+    subroutine get_data_bc_manager(self, bc_index, current_time, values)
+        implicit none
+        class(type_bc_manager), intent(inout) :: self
+        integer(int32), intent(in) :: bc_index
+        real(real64), intent(in) :: current_time
+        real(real64), intent(inout) :: values(BC_DATA_SIZE)
+
+        call self%strategies(bc_index)%p%get_data(current_time, values)
+    end subroutine get_data_bc_manager
+
+    !> The JSON boundary id of the condition at index `bc_index`.
+    pure function get_boundary_id_bc_manager(self, bc_index) result(boundary_id)
+        implicit none
+        class(type_bc_manager), intent(in) :: self
+        integer(int32), intent(in) :: bc_index
+        integer(int32) :: boundary_id
+
+        boundary_id = self%boundary_ids(bc_index)
+    end function get_boundary_id_bc_manager
 
 end module physics_governing_boundary_manager

@@ -9,7 +9,7 @@ contains
         real(real64), intent(in) :: u_curr
         type(type_bc_result), intent(inout) :: result
 
-        real(real64) :: values(3)
+        real(real64) :: values(BC_DATA_SIZE)
 
         call self%provider%get_data(current_time, values)
         call result%initialize()

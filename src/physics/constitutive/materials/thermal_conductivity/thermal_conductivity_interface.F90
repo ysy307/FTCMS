@@ -47,13 +47,16 @@ module materials_thermal_conductivity
     end type abst_thc
 
     abstract interface
-        subroutine abst_calc_thc_gp(self, state, lambda)
+        !> Bulk thermal conductivity \(\lambda\) of a state, W/(m K), and
+        !> optionally its tangent in \((p_w,T)\) through the phase contents.
+        subroutine abst_calc_thc_gp(self, state, lambda, tangent)
             import :: abst_thc, type_state, real64
             implicit none
             class(abst_thc), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: lambda
-
+            !> \((\partial\lambda/\partial p_w,\partial\lambda/\partial T)\); overwritten on exit when present
+            real(real64), intent(inout), optional :: tangent(2)
         end subroutine abst_calc_thc_gp
 
         subroutine abst_calc_thc_dispersivity_gp(self, state, lambda)
@@ -86,12 +89,12 @@ module materials_thermal_conductivity
     end type type_thc_1phase
 
     interface
-        module subroutine calc_thc_gp_1phase(self, state, lambda)
+        module subroutine calc_thc_gp_1phase(self, state, lambda, tangent)
             implicit none
             class(type_thc_1phase), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: lambda
-
+            real(real64), intent(inout), optional :: tangent(2)
         end subroutine calc_thc_gp_1phase
 
         module subroutine calc_thc_dispersivity_gp_1phase(self, state, lambda)
@@ -110,12 +113,12 @@ module materials_thermal_conductivity
     end type type_thc_2phase
 
     interface
-        module subroutine calc_thc_gp_2phase(self, state, lambda)
+        module subroutine calc_thc_gp_2phase(self, state, lambda, tangent)
             implicit none
             class(type_thc_2phase), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: lambda
-
+            real(real64), intent(inout), optional :: tangent(2)
         end subroutine calc_thc_gp_2phase
 
         module subroutine calc_thc_dispersivity_gp_2phase(self, state, lambda)
@@ -134,12 +137,12 @@ module materials_thermal_conductivity
     end type type_thc_3phase
 
     interface
-        module subroutine calc_thc_gp_3phase(self, state, lambda)
+        module subroutine calc_thc_gp_3phase(self, state, lambda, tangent)
             implicit none
             class(type_thc_3phase), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: lambda
-
+            real(real64), intent(inout), optional :: tangent(2)
         end subroutine calc_thc_gp_3phase
 
         module subroutine calc_thc_dispersivity_gp_3phase(self, state, lambda)
@@ -158,12 +161,12 @@ module materials_thermal_conductivity
     end type type_thc_4phase
 
     interface
-        module subroutine calc_thc_gp_4phase(self, state, lambda)
+        module subroutine calc_thc_gp_4phase(self, state, lambda, tangent)
             implicit none
             class(type_thc_4phase), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: lambda
-
+            real(real64), intent(inout), optional :: tangent(2)
         end subroutine calc_thc_gp_4phase
 
         module subroutine calc_thc_dispersivity_gp_4phase(self, state, lambda)
@@ -176,57 +179,6 @@ module materials_thermal_conductivity
     end interface
 
     interface
-        module subroutine calc_thc_2(lambda_soil, phi_soil, &
-                                     lambda_water, phi_water, lambda)
-            implicit none
-            real(real64), intent(in) :: lambda_soil
-            real(real64), intent(in) :: phi_soil
-            real(real64), intent(in) :: lambda_water
-            real(real64), intent(in) :: phi_water
-            real(real64), intent(inout) :: lambda
-
-        end subroutine calc_thc_2
-
-        module subroutine calc_thc_3(lambda_soil, phi_soil, &
-                                     lambda_water, phi_water, &
-                                     lambda_ice, phi_ice, lambda)
-            implicit none
-            real(real64), intent(in) :: lambda_soil
-            real(real64), intent(in) :: phi_soil
-            real(real64), intent(in) :: lambda_water
-            real(real64), intent(in) :: phi_water
-            real(real64), intent(in) :: lambda_ice
-            real(real64), intent(in) :: phi_ice
-            real(real64), intent(inout) :: lambda
-
-        end subroutine calc_thc_3
-
-        module subroutine calc_thc_4(lambda_soil, phi_soil, &
-                                     lambda_water, phi_water, &
-                                     lambda_ice, phi_ice, &
-                                     lambda_vapor, phi_vapor, lambda)
-            implicit none
-            real(real64), intent(in) :: lambda_soil
-            real(real64), intent(in) :: phi_soil
-            real(real64), intent(in) :: lambda_water
-            real(real64), intent(in) :: phi_water
-            real(real64), intent(in) :: lambda_ice
-            real(real64), intent(in) :: phi_ice
-            real(real64), intent(in) :: lambda_vapor
-            real(real64), intent(in) :: phi_vapor
-            real(real64), intent(inout) :: lambda
-
-        end subroutine calc_thc_4
-
-        module subroutine calc_thc_4_vadoze(A, B, C, D, F1, F2, phi_water, phi_ice, lambda)
-            implicit none
-            real(real64), intent(in) :: A, B, C, D
-            real(real64), intent(in) :: F1, F2
-            real(real64), intent(in) :: phi_water, phi_ice
-            real(real64), intent(inout) :: lambda
-
-        end subroutine calc_thc_4_vadoze
-
         module subroutine calc_lambda_dispersivity_abst_thc(self, lambda_0, htc_water, q_x, q_y, q_z, lambda)
             implicit none
             class(abst_thc), intent(in) :: self

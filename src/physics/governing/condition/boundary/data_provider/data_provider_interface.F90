@@ -5,9 +5,13 @@ module boundary_data_provider
     private
 
     public :: abst_bc_data
+    public :: BC_DATA_SIZE
     public :: type_bc_data_constant
     public :: type_bc_data_dynamic
     public :: type_bc_data_table
+
+    !> How many numbers one condition's data carries at one time.
+    integer(int32), parameter :: BC_DATA_SIZE = 5
 
     type, abstract :: abst_bc_data
         type(type_constant_id), private :: data_kind = type_constant_id("", "", -1)
@@ -35,15 +39,15 @@ module boundary_data_provider
         end subroutine abst_destroy_bc_data
 
         pure subroutine abst_get_data(self, current_time, values)
-            import :: abst_bc_data, real64
+            import :: abst_bc_data, real64, BC_DATA_SIZE
             implicit none
             class(abst_bc_data), intent(inout) :: self
             real(real64), intent(in) :: current_time
-            real(real64), intent(inout) :: values(3)
+            real(real64), intent(inout) :: values(BC_DATA_SIZE)
         end subroutine abst_get_data
 
         subroutine abst_update_data(self, new_values)
-            import :: abst_bc_data, real64
+            import :: abst_bc_data, real64, BC_DATA_SIZE
             implicit none
             class(abst_bc_data), intent(inout) :: self
             real(real64), intent(in) :: new_values(:)
@@ -96,7 +100,7 @@ module boundary_data_provider
             implicit none
             class(type_bc_data_constant), intent(inout) :: self
             real(real64), intent(in) :: current_time
-            real(real64), intent(inout) :: values(3)
+            real(real64), intent(inout) :: values(BC_DATA_SIZE)
         end subroutine get_data_bc_data_constant
 
         module subroutine update_data_constant(self, new_values)
@@ -120,7 +124,7 @@ module boundary_data_provider
             implicit none
             class(type_bc_data_dynamic), intent(inout) :: self
             real(real64), intent(in) :: current_time
-            real(real64), intent(inout) :: values(3)
+            real(real64), intent(inout) :: values(BC_DATA_SIZE)
         end subroutine get_data_bc_data_dynamic
 
         module subroutine update_data_bc_data_dynamic(self, new_values)
@@ -144,7 +148,7 @@ module boundary_data_provider
             implicit none
             class(type_bc_data_table), intent(inout) :: self
             real(real64), intent(in) :: current_time
-            real(real64), intent(inout) :: values(3)
+            real(real64), intent(inout) :: values(BC_DATA_SIZE)
         end subroutine get_data_bc_data_table
 
         module pure subroutine calc_time_coefficient_bc_data_table(self, current_time, coef, idx)

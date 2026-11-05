@@ -10,42 +10,20 @@ module io_input_translator
     contains
         generic, public :: execute => execute_condition_boundary, &
             execute_condition_initial, &
-            execute_condition_acceleration, &
             execute_condition_time, &
             execute_condition_time_ats, &
             execute_basic_properties, &
             execute_basic_swcc, &
             execute_basic_gcc, &
-            execute_basic_iteration, &
-            execute_basic_parallel_openmp, &
-            execute_basic_control_manager, &
-            execute_geometry_domain_nodes, &
-            execute_geometry_domain_elements, &
-            execute_geometry_domain_boundaries, &
-            execute_output_field, &
-            execute_output_manager, &
-            execute_output_base, &
-            execute_output_observation, &
-            execute_output_overall
+            execute_output_manager
         procedure, private, pass(self) :: execute_condition_boundary
         procedure, private, pass(self) :: execute_condition_initial
-        procedure, private, pass(self) :: execute_condition_acceleration
         procedure, private, pass(self) :: execute_condition_time
         procedure, private, pass(self) :: execute_condition_time_ats
         procedure, private, pass(self) :: execute_basic_properties
         procedure, private, pass(self) :: execute_basic_swcc
         procedure, private, pass(self) :: execute_basic_gcc
-        procedure, private, pass(self) :: execute_basic_iteration
-        procedure, private, pass(self) :: execute_basic_parallel_openmp
-        procedure, private, pass(self) :: execute_basic_control_manager
-        procedure, private, pass(self) :: execute_geometry_domain_nodes
-        procedure, private, pass(self) :: execute_geometry_domain_elements
-        procedure, private, pass(self) :: execute_geometry_domain_boundaries
-        procedure, private, pass(self) :: execute_output_field
         procedure, private, pass(self) :: execute_output_manager
-        procedure, private, pass(self) :: execute_output_base
-        procedure, private, pass(self) :: execute_output_observation
-        procedure, private, pass(self) :: execute_output_overall
 
     end type type_input_translator
 
@@ -68,14 +46,6 @@ module io_input_translator
             type(type_config_ic), intent(inout) :: config
 
         end subroutine execute_condition_initial
-
-        module subroutine execute_condition_acceleration(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_acceleration), intent(inout) :: config
-
-        end subroutine execute_condition_acceleration
 
         module subroutine execute_condition_time(self, input, config)
             implicit none
@@ -120,63 +90,6 @@ module io_input_translator
 
         end subroutine execute_basic_gcc
 
-        module subroutine execute_basic_iteration(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_iteration), intent(inout) :: config
-
-        end subroutine execute_basic_iteration
-
-        module subroutine execute_basic_parallel_openmp(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_parallel_openmp), intent(inout) :: config
-
-        end subroutine execute_basic_parallel_openmp
-
-        module subroutine execute_basic_control_manager(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_control_manager), intent(inout) :: config
-
-        end subroutine execute_basic_control_manager
-
-        module subroutine execute_geometry_domain_nodes(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_nodes), intent(inout) :: config
-
-        end subroutine execute_geometry_domain_nodes
-
-        module subroutine execute_geometry_domain_elements(self, input, config_elements, config_multicoloring)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_elements), intent(inout) :: config_elements
-            type(type_config_multicoloring), intent(inout) :: config_multicoloring
-
-        end subroutine execute_geometry_domain_elements
-
-        module subroutine execute_geometry_domain_boundaries(self, input, config_elements)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_elements), intent(inout), allocatable :: config_elements(:)
-
-        end subroutine execute_geometry_domain_boundaries
-
-        module subroutine execute_output_field(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_output_manager), intent(inout) :: config
-
-        end subroutine execute_output_field
-
         module subroutine execute_output_manager(self, input, output_type, config)
             implicit none
             class(type_input_translator), intent(in) :: self
@@ -186,29 +99,6 @@ module io_input_translator
 
         end subroutine execute_output_manager
 
-        module subroutine execute_output_base(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_output), intent(inout) :: config
-
-        end subroutine execute_output_base
-
-        module subroutine execute_output_observation(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_observation), intent(inout) :: config
-
-        end subroutine execute_output_observation
-
-        module subroutine execute_output_overall(self, input, config)
-            implicit none
-            class(type_input_translator), intent(in) :: self
-            class(type_input), intent(in) :: input
-            type(type_config_overall), intent(inout) :: config
-
-        end subroutine execute_output_overall
     end interface
 
 ! contains

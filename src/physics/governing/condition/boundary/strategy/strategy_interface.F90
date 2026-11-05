@@ -33,6 +33,7 @@ module boundary_strategy
         procedure, public, pass(self) :: initialize => initialize_abst_bc
         procedure, public, pass(self) :: destroy => destroy_abst_bc
         procedure, public, pass(self) :: update_provider_data => update_provider_data_abst_bc
+        procedure, public, pass(self) :: get_data => get_data_abst_bc
         procedure(abst_evaluate), public, pass(self), deferred :: evaluate
     end type abst_bc
 
@@ -106,6 +107,13 @@ module boundary_strategy
             class(abst_bc), intent(inout) :: self
             real(real64), intent(in) :: new_values(:)
         end subroutine update_provider_data_abst_bc
+
+        module subroutine get_data_abst_bc(self, current_time, values)
+            implicit none
+            class(abst_bc), intent(inout) :: self
+            real(real64), intent(in) :: current_time
+            real(real64), intent(inout) :: values(BC_DATA_SIZE)
+        end subroutine get_data_abst_bc
 
         module subroutine evaluate_dirichlet_bc(self, current_time, u_curr, result)
             implicit none

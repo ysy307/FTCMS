@@ -1,0 +1,33 @@
+{
+    "enabled": true,
+    "ensemble": {
+        "size": 30,
+        "max_height": 50.0,
+        "num_nodes": 20
+    },
+    "observation": {
+        "csv_file": "obs_data.csv",
+        "upper_bc_file": "upper_bc.csv",
+        "interval_seconds": 3600.0,
+        "sigma_T": 0.5,
+        "sigma_q": 0.0001,
+        "sigma_U": 0.5
+    },
+    "surface": {
+        "z0": 0.01,
+        "albedo": 0.3,
+        "emissivity": 0.95,
+        "Pmin": -100000.0,
+        "Pmax": 0.0,
+        "lambda_soil": 1.5,
+        "stomatal_resistance": 50.0
+    },
+    "reference_datetime": "2026-01-01T00:00:00",
+    "solar": {
+        "latitude": 35.67,
+        "longitude": 139.48,
+        "tau_atm": 0.6,
+        "utc_offset_hours": 9.0
+    },
+    "surface_boundary": 5
+}

@@ -18,6 +18,7 @@ contains
         call read_geometry_settings(self, json)
         call read_materials(self, json)
         call read_solver_settings(self, json)
+        call read_discretization_settings(self, json)
 
         call json%destroy()
         call json%print_error_message(output_unit)
@@ -45,6 +46,8 @@ contains
             end do
             write (*, '(A)') "=== Solver Settings ==="
             call self%solver_settings%display()
+            write (*, '(A)') "=== Discretization Settings ==="
+            call self%discretization_settings%display(self%analysis_controls%is_active)
         end if
     end subroutine display_input_basic
 

@@ -36,7 +36,7 @@ contains
         implicit none
         class(type_bc_data_table), intent(inout) :: self
         real(real64), intent(in) :: current_time
-        real(real64), intent(inout) :: values(3)
+        real(real64), intent(inout) :: values(BC_DATA_SIZE)
 
         real(real64) :: coef
         integer(int32) :: idx, num_vars
@@ -46,13 +46,13 @@ contains
 
         call self%calc_time_coefficient(current_time, coef, idx)
 
-        num_vars = min(3, size(self%table_values, 1))
+        num_vars = min(BC_DATA_SIZE, size(self%table_values, 1))
 
         if (idx < size(self%time_points)) then
-            values(1:num_vars) = self%table_values(:, idx) + &
-                                 coef * (self%table_values(:, idx + 1) - self%table_values(:, idx))
+            values(1:num_vars) = self%table_values(1:num_vars, idx) + &
+                                 coef * (self%table_values(1:num_vars, idx + 1) - self%table_values(1:num_vars, idx))
         else
-            values(1:num_vars) = self%table_values(:, size(self%time_points))
+            values(1:num_vars) = self%table_values(1:num_vars, size(self%time_points))
         end if
     end subroutine get_data_bc_data_table
 

@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import pyvista as pv
 
+from ftcms_fields import read_fields
+
 ICE_TO_WATER_VOLUME_RATIO = 917.0 / 1000.0
 REFERENCE_FLUX_M_S = 1.74e-8
 
@@ -56,7 +58,8 @@ def main():
         parser.error("pass --vtu or --vtu_dir")
     path = args.vtu if args.vtu is not None else _latest_vtu(args.vtu_dir)
 
-    grid = pv.read(path)
+    # Cell fields (the engine's derived quantities) are averaged onto the nodes.
+    grid = read_fields(path).cell_data_to_point_data(pass_cell_data=True)
     pd = grid.point_data
     z = grid.points[:, 2]
     temperature = np.asarray(pd["Temperature"])

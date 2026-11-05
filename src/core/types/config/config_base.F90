@@ -4,7 +4,6 @@ module core_types_config_base
     use :: core_validation, only:raise_error
     use :: core_types_geometry_coordinate, only:type_coordinate_dp
     use :: core_types_geometry_coordinate_array, only:type_coordinate_array_dp
-    use :: core_types_topology_connectivity, only:type_csr_index
     use :: core_types_utils_datetime, only:type_datetime
 
     implicit none
@@ -40,7 +39,6 @@ module core_types_config_base
         procedure, private, pass(self) :: set_constant_value
         procedure, private, pass(self) :: set_constant_values
         procedure, private, pass(self) :: set_coordinate_array_dp
-        procedure, private, pass(self) :: set_csr_index
         procedure, private, pass(self) :: set_coordinate_dp
         procedure, private, pass(self) :: set_datetime
         procedure, private, pass(self) :: set_datetimes
@@ -51,7 +49,7 @@ module core_types_config_base
             set_logical, set_logical_1d, set_logical_2d, set_logical_3d, &
             set_character, set_character_1d, set_character_2d, set_character_3d, &
             set_constant_id, set_constant_ids, set_constant_value, set_constant_values, &
-            set_coordinate_array_dp, set_csr_index, set_coordinate_dp, set_datetime, set_datetimes
+            set_coordinate_array_dp, set_coordinate_dp, set_datetime, set_datetimes
 
         procedure(abst_copy_config), public, pass(self), deferred :: copy
         procedure(abst_reset_config), public, pass(self), deferred :: reset
@@ -382,15 +380,6 @@ contains
 
         member = value
     end subroutine set_coordinate_array_dp
-
-    subroutine set_csr_index(self, member, value)
-        implicit none
-        class(abst_config), intent(in) :: self
-        type(type_csr_index), intent(inout) :: member
-        type(type_csr_index), intent(in) :: value
-
-        call member%copy(value)
-    end subroutine set_csr_index
 
     subroutine set_coordinate_dp(self, member, value)
         implicit none

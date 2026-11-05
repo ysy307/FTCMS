@@ -10,7 +10,9 @@ module test_constitutive_suite
     use :: models_phase_change_fusion, only: type_fusion, PORE_LIMIT_EXPELS_WATER
     use :: models_phase_change_manager, only: type_phase_manager
     use :: models_wrf, only: holder_wrfs
-    use :: numerical_special_functions_mkl, only: type_mkl_regularized_incomplete_beta
+    use :: numerical_special_functions, only: type_regularized_incomplete_beta
+    use :: constitutive_laws
+    use :: physics_constitutive_base, only: type_iapws_wrapper
     implicit none
     private
 
@@ -24,11 +26,12 @@ module test_constitutive_suite
         procedure, private :: test_wrf_derivatives
         procedure, private :: test_pressure_capacity_units
         procedure, private :: test_special_functions
+        procedure, private :: test_law_tangents
         procedure, private :: test_hcf_vg_dispatch
         procedure, private :: test_hcf_thermal_conductivity
         procedure, private :: test_freezing_storage_transport_split
-        procedure, private :: test_incomplete_beta_thread_safety
         procedure, private :: test_vapor_combined_evaluation
+        procedure, private :: test_iapws_memo
         procedure, private :: test_saturation_pressure
         procedure, private :: test_no_spurious_ice_at_warm_state
         procedure, private :: test_blend_derivative_sweep
@@ -50,11 +53,12 @@ contains
         call self%test_wrf_derivatives()
         call self%test_pressure_capacity_units()
         call self%test_special_functions()
+        call self%test_law_tangents()
         call self%test_hcf_vg_dispatch()
         call self%test_hcf_thermal_conductivity()
         call self%test_freezing_storage_transport_split()
-        call self%test_incomplete_beta_thread_safety()
         call self%test_vapor_combined_evaluation()
+        call self%test_iapws_memo()
         call self%test_saturation_pressure()
         call self%test_no_spurious_ice_at_warm_state()
         call self%test_blend_derivative_sweep()
@@ -208,11 +212,162 @@ contains
         write (output_unit, '(A,ES24.16)') "L-scheme capacity floor [1/Pa]       = ", lscheme_capacity
     end subroutine test_pressure_capacity_units
 
+    !> Every generated tangent against a central difference of its value routine.
+    !>
+    !> Checks the whole chain sympy.diff -> cse -> printed Fortran, one input
+    !> direction at a time: a law with n inputs is called with the n unit
+    !> tangents, so its output tangent is its gradient.
+    subroutine test_law_tangents(self)
+        implicit none
+        class(type_constitutive_test_suite), intent(inout) :: self
+
+        real(real64), parameter :: tolerance = 1.0d-6
+        type(type_regularized_incomplete_beta) :: beta
+        real(real64) :: h, step, value, ahead, behind, zeta, beta_value, a, b
+        real(real64) :: tangent(1), gradient(10), x(10), unit(10, 10)
+        integer(int32) :: k
+
+        unit(:, :) = 0.0d0
+        do k = 1, 10
+            unit(k, k) = 1.0d0
+        end do
+
+        ! Single-input laws: d/dh or d/dT.
+        h = -0.7d0
+        step = 1.0d-6
+        call evaluate_kr_brooks_corey_tangent(-0.3d0, 2.0d0, 0.5d0, h, [1.0d0], value, tangent)
+        call evaluate_kr_brooks_corey(-0.3d0, 2.0d0, 0.5d0, h + step, ahead)
+        call evaluate_kr_brooks_corey(-0.3d0, 2.0d0, 0.5d0, h - step, behind)
+        call self%check_close("Brooks-Corey kr tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        call evaluate_kr_van_genuchten_tangent(1.11d0, 1.48d0, 1.0d0 - 1.0d0 / 1.48d0, 0.5d0, h, [1.0d0], value, tangent)
+        call evaluate_kr_van_genuchten(1.11d0, 1.48d0, 1.0d0 - 1.0d0 / 1.48d0, 0.5d0, h + step, ahead)
+        call evaluate_kr_van_genuchten(1.11d0, 1.48d0, 1.0d0 - 1.0d0 / 1.48d0, 0.5d0, h - step, behind)
+        call self%check_close("van Genuchten kr tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        ! Independent m: the incomplete beta is evaluated by the caller at each head.
+        a = 0.2d0 + 1.0d0 / 1.48d0
+        b = 1.0d0 - 1.0d0 / 1.48d0
+        call beta%initialize(a, b)
+        call evaluate_van_genuchten_mualem_argument(1.11d0, 1.48d0, h, zeta)
+        call beta%evaluate(zeta, beta_value)
+        call evaluate_kr_van_genuchten_mualem_tangent(1.11d0, 1.48d0, 0.2d0, 0.5d0, a, b, beta%get_log_normalization(), &
+                                                      beta_value, h, [1.0d0], value, tangent)
+        call evaluate_van_genuchten_mualem_argument(1.11d0, 1.48d0, h + step, zeta)
+        call beta%evaluate(zeta, beta_value)
+        call evaluate_kr_van_genuchten_mualem(1.11d0, 1.48d0, 0.2d0, 0.5d0, beta_value, h + step, ahead)
+        call evaluate_van_genuchten_mualem_argument(1.11d0, 1.48d0, h - step, zeta)
+        call beta%evaluate(zeta, beta_value)
+        call evaluate_kr_van_genuchten_mualem(1.11d0, 1.48d0, 0.2d0, 0.5d0, beta_value, h - step, behind)
+        call self%check_close("van Genuchten-Mualem kr tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        call evaluate_kr_modified_van_genuchten_tangent(1.11d0, 1.48d0, 0.32d0, 0.5d0, -0.02d0, h, [1.0d0], value, tangent)
+        call evaluate_kr_modified_van_genuchten(1.11d0, 1.48d0, 0.32d0, 0.5d0, -0.02d0, h + step, ahead)
+        call evaluate_kr_modified_van_genuchten(1.11d0, 1.48d0, 0.32d0, 0.5d0, -0.02d0, h - step, behind)
+        call self%check_close("modified van Genuchten kr tangent", tangent(1), (ahead - behind) / (2.0d0 * step), &
+                              tolerance)
+
+        call evaluate_kr_kosugi_tangent(-0.5d0, 1.2d0, 0.5d0, h, [1.0d0], value, tangent)
+        call evaluate_kr_kosugi(-0.5d0, 1.2d0, 0.5d0, h + step, ahead)
+        call evaluate_kr_kosugi(-0.5d0, 1.2d0, 0.5d0, h - step, behind)
+        call self%check_close("Kosugi kr tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        call evaluate_kr_durner_tangent(1.1d0, 1.5d0, 0.33d0, 5.0d0, 2.0d0, 0.5d0, 0.6d0, 0.4d0, 0.5d0, h, [1.0d0], &
+                                        value, tangent)
+        call evaluate_kr_durner(1.1d0, 1.5d0, 0.33d0, 5.0d0, 2.0d0, 0.5d0, 0.6d0, 0.4d0, 0.5d0, h + step, ahead)
+        call evaluate_kr_durner(1.1d0, 1.5d0, 0.33d0, 5.0d0, 2.0d0, 0.5d0, 0.6d0, 0.4d0, 0.5d0, h - step, behind)
+        call self%check_close("Durner kr tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        call evaluate_water_viscosity_exponential_tangent(-2.0d0, [1.0d0], value, tangent)
+        call evaluate_water_viscosity_exponential(-2.0d0 + step, ahead)
+        call evaluate_water_viscosity_exponential(-2.0d0 - step, behind)
+        call self%check_close("exponential viscosity tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        call evaluate_water_viscosity_supercooled_tangent(-2.0d0, [1.0d0], value, tangent)
+        call evaluate_water_viscosity_supercooled(-2.0d0 + step, ahead)
+        call evaluate_water_viscosity_supercooled(-2.0d0 - step, behind)
+        call self%check_close("supercooled viscosity tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        call evaluate_ice_impedance_tangent(7.0d0, 0.3d0, [1.0d0], value, tangent)
+        call evaluate_ice_impedance(7.0d0, 0.3d0 + step, ahead)
+        call evaluate_ice_impedance(7.0d0, 0.3d0 - step, behind)
+        call self%check_close("ice impedance tangent", tangent(1), (ahead - behind) / (2.0d0 * step), tolerance)
+
+        ! Multi-input laws: the gradient, one unit direction per input.
+        x(1:2) = [0.2d0, 0.1d0]
+        call evaluate_ice_impedance_ratio_tangent(0.05d0, x(1), unit(1:2, 1), x(2), unit(1:2, 2), value, gradient(1:2))
+        do k = 1, 2
+            call evaluate_ice_impedance_ratio(0.05d0, x(1) + step * unit(1, k), x(2) + step * unit(2, k), ahead)
+            call evaluate_ice_impedance_ratio(0.05d0, x(1) - step * unit(1, k), x(2) - step * unit(2, k), behind)
+            call self%check_close("ice ratio gradient", gradient(k), (ahead - behind) / (2.0d0 * step), tolerance)
+        end do
+
+        x(1:4) = [0.465d0, 0.2d0, 0.15d0, 0.185d0]
+        call evaluate_thermal_conductivity_geometric4_tangent(3.78d0, 0.6d0, 2.2d0, 0.0241d0, &
+                                                              x(1), unit(1:4, 1), x(2), unit(1:4, 2), &
+                                                              x(3), unit(1:4, 3), x(4), unit(1:4, 4), value, gradient(1:4))
+        do k = 1, 4
+            call evaluate_thermal_conductivity_geometric4(3.78d0, 0.6d0, 2.2d0, 0.0241d0, &
+                                                          x(1) + step * unit(1, k), x(2) + step * unit(2, k), &
+                                                          x(3) + step * unit(3, k), x(4) + step * unit(4, k), ahead)
+            call evaluate_thermal_conductivity_geometric4(3.78d0, 0.6d0, 2.2d0, 0.0241d0, &
+                                                          x(1) - step * unit(1, k), x(2) - step * unit(2, k), &
+                                                          x(3) - step * unit(3, k), x(4) - step * unit(4, k), behind)
+            call self%check_close("geometric conductivity gradient", gradient(k), (ahead - behind) / (2.0d0 * step), &
+                                  tolerance)
+        end do
+
+        x(1:2) = [0.2d0, 0.15d0]
+        call evaluate_thermal_conductivity_campbell_hansson_tangent(0.55d0, 0.8d0, 3.07d0, 0.13d0, 13.05d0, 1.06d0, &
+                                                                    x(1), unit(1:2, 1), x(2), unit(1:2, 2), &
+                                                                    value, gradient(1:2))
+        do k = 1, 2
+            call evaluate_thermal_conductivity_campbell_hansson(0.55d0, 0.8d0, 3.07d0, 0.13d0, 13.05d0, 1.06d0, &
+                                                                x(1) + step * unit(1, k), x(2) + step * unit(2, k), ahead)
+            call evaluate_thermal_conductivity_campbell_hansson(0.55d0, 0.8d0, 3.07d0, 0.13d0, 13.05d0, 1.06d0, &
+                                                                x(1) - step * unit(1, k), x(2) - step * unit(2, k), behind)
+            call self%check_close("Campbell-Hansson gradient", gradient(k), (ahead - behind) / (2.0d0 * step), tolerance)
+        end do
+
+        ! T, theta_w, theta_i, theta_v, rho_w, c_w, rho_i, c_i, c_v, L_v.
+        x(:) = [-1.0d0, 0.2d0, 0.15d0, 1.0d-6, 999.8d0, 4217.0d0, 916.7d0, 2093.0d0, 1859.0d0, 2.5d6]
+        call evaluate_enthalpy_density_tangent(2.5536d6 * 0.465d0, 334560.0d0, x(1), unit(:, 1), x(2), unit(:, 2), &
+                                               x(3), unit(:, 3), x(4), unit(:, 4), x(5), unit(:, 5), x(6), unit(:, 6), &
+                                               x(7), unit(:, 7), x(8), unit(:, 8), x(9), unit(:, 9), x(10), unit(:, 10), &
+                                               value, gradient)
+        do k = 1, 10
+            ! U is linear in each input, so a central difference is exact at any
+            ! step; a large one keeps it clear of the cancellation in U itself.
+            step = 1.0d-1 * max(1.0d0, abs(x(k)))
+            associate (p => x + step * unit(:, k), m => x - step * unit(:, k))
+                call evaluate_enthalpy_density(2.5536d6 * 0.465d0, 334560.0d0, p(1), p(2), p(3), p(4), p(5), p(6), &
+                                               p(7), p(8), p(9), p(10), ahead)
+                call evaluate_enthalpy_density(2.5536d6 * 0.465d0, 334560.0d0, m(1), m(2), m(3), m(4), m(5), m(6), &
+                                               m(7), m(8), m(9), m(10), behind)
+            end associate
+            call self%check_close("enthalpy gradient", gradient(k), (ahead - behind) / (2.0d0 * step), tolerance)
+        end do
+
+        ! theta_w, theta_i, theta_v, rho_w, rho_i, S_c.
+        x(1:6) = [0.2d0, 0.15d0, 1.0d-6, 999.8d0, 916.7d0, 1.0d-7]
+        call evaluate_total_stored_water_tangent(x(1), unit(1:6, 1), x(2), unit(1:6, 2), x(3), unit(1:6, 3), &
+                                                 x(4), unit(1:6, 4), x(5), unit(1:6, 5), x(6), unit(1:6, 6), &
+                                                 value, gradient(1:6))
+        do k = 1, 6
+            step = 1.0d-6 * max(1.0d0, abs(x(k)))
+            associate (p => x(1:6) + step * unit(1:6, k), m => x(1:6) - step * unit(1:6, k))
+                call evaluate_total_stored_water(p(1), p(2), p(3), p(4), p(5), p(6), ahead)
+                call evaluate_total_stored_water(m(1), m(2), m(3), m(4), m(5), m(6), behind)
+            end associate
+            call self%check_close("stored water gradient", gradient(k), (ahead - behind) / (2.0d0 * step), tolerance)
+        end do
+    end subroutine test_law_tangents
+
     subroutine test_special_functions(self)
         implicit none
         class(type_constitutive_test_suite), intent(inout) :: self
 
-        type(type_mkl_regularized_incomplete_beta) :: incomplete_beta
+        type(type_regularized_incomplete_beta) :: incomplete_beta
         real(real64) :: value
         logical :: converged
 
@@ -220,14 +375,14 @@ contains
         converged = .false.
         call incomplete_beta%initialize(2.0d0, 3.0d0)
         call incomplete_beta%evaluate(0.5d0, value, converged)
-        call self%check_true("MKL incomplete beta continued fraction converged", converged)
+        call self%check_true("incomplete beta continued fraction converged", converged)
         call self%check_close("regularized incomplete beta I_0.5(2,3)", value, 0.6875d0, 2.0d-14)
 
         value = 0.0d0
         converged = .false.
         call incomplete_beta%initialize(0.5d0, 0.5d0)
         call incomplete_beta%evaluate(0.5d0, value, converged)
-        call self%check_true("MKL incomplete beta symmetric case converged", converged)
+        call self%check_true("incomplete beta symmetric case converged", converged)
         call self%check_close("regularized incomplete beta I_0.5(0.5,0.5)", value, 0.5d0, 2.0d-14)
     end subroutine test_special_functions
 
@@ -240,7 +395,7 @@ contains
         type(holder_hcfs) :: hcf
         type(type_iapws97), target :: water
         type(type_iapws06), target :: ice
-        type(type_mkl_regularized_incomplete_beta) :: incomplete_beta
+        type(type_regularized_incomplete_beta) :: incomplete_beta
         real(real64), parameter :: rho_g = 1000.0d0 * 9.80665d0
         real(real64) :: effective_saturation, zeta, beta_value
         real(real64) :: conductivity, expected_conductivity
@@ -434,42 +589,6 @@ contains
                              freezing_level_set > 0.0d0)
     end subroutine test_freezing_storage_transport_split
 
-    subroutine test_incomplete_beta_thread_safety(self)
-        implicit none
-        class(type_constitutive_test_suite), intent(inout) :: self
-
-        integer(int32), parameter :: num_evaluations = 100000
-        type(type_mkl_regularized_incomplete_beta) :: incomplete_beta
-        real(real64), allocatable :: serial_values(:), parallel_values(:)
-        integer(int32) :: i
-        real(real64) :: x, value
-        logical :: converged
-
-        allocate (serial_values(num_evaluations), parallel_values(num_evaluations))
-        call incomplete_beta%initialize(0.2d0 + 1.0d0 / 1.48d0, 1.0d0 - 1.0d0 / 1.48d0)
-
-        do i = 1, num_evaluations
-            x = 0.01d0 + 0.98d0 * real(mod(i, 997), real64) / 996.0d0
-            value = 0.0d0
-            converged = .false.
-            call incomplete_beta%evaluate(x, value, converged)
-            serial_values(i) = value
-        end do
-
-        !$omp parallel do default(none) shared(incomplete_beta, parallel_values) &
-        !$omp private(x, value, converged) schedule(static)
-        do i = 1, num_evaluations
-            x = 0.01d0 + 0.98d0 * real(mod(i, 997), real64) / 996.0d0
-            value = 0.0d0
-            converged = .false.
-            call incomplete_beta%evaluate(x, value, converged)
-            parallel_values(i) = value
-        end do
-        !$omp end parallel do
-
-        call self%check_true("shared incomplete beta evaluator is thread-safe", &
-                             all(serial_values == parallel_values))
-    end subroutine test_incomplete_beta_thread_safety
 
     subroutine test_vapor_combined_evaluation(self)
         implicit none
@@ -500,6 +619,55 @@ contains
         call self%check_close("combined vapor pressure derivative", dP_combined, dP_separate, 2.0d-14)
         call self%check_close("combined vapor temperature derivative", dT_combined, dT_separate, 2.0d-14)
     end subroutine test_vapor_combined_evaluation
+
+    !> The IAPWS memo answers what IAPWS answers, bit for bit, whatever the order of the states.
+    subroutine test_iapws_memo(self)
+        implicit none
+        class(type_constitutive_test_suite), intent(inout) :: self
+
+        type(type_iapws_wrapper) :: wrapper
+        type(type_iapws97), target :: water
+        type(type_iapws06), target :: ice
+        type(type_state) :: state
+        ! A warm saturated state, a frozen suction state, then the first again.
+        real(real64), parameter :: temperatures(3) = [5.0d0, -2.0d0, 5.0d0]
+        real(real64), parameter :: pressures(3) = [2.0d4, -3.0d4, 2.0d4]
+        real(real64), parameter :: T_K(3) = temperatures + 273.15d0
+        real(real64), parameter :: P_abs(3) = [101325.0d0 + 2.0d4, 101325.0d0, 101325.0d0 + 2.0d4]
+        real(real64) :: memo(9), direct(9), unused(6)
+        integer(int32) :: k
+
+        call water%initialize()
+        call ice%initialize()
+        call wrapper%initialize(water, ice)
+        do k = 1, size(temperatures)
+            call state%temperature%set(temperatures(k))
+            call state%pressure%set(pressures(k))
+            call wrapper%calc_rho_water(state, memo(1))
+            call wrapper%calc_cp_water(state, memo(2))
+            call wrapper%calc_drho_water_dT(state, memo(3))
+            call wrapper%calc_rho_ice(state, memo(4))
+            call wrapper%calc_cp_ice(state, memo(5))
+            call wrapper%calc_rho_vapor_saturation(state, memo(6))
+            call wrapper%calc_latent_heat_saturation(max(T_K(k), 273.16d0), memo(7))
+            call wrapper%calc_dcp_water_dT(state, memo(8))
+            call wrapper%calc_dcp_water_dP(state, memo(9))
+            call water%calc_rho(T_K(k), P_abs(k), direct(1))
+            call water%calc_cp(T_K(k), P_abs(k), direct(2))
+            call water%calc_drho_dT(T_K(k), P_abs(k), direct(3))
+            call ice%calc_rho(T_K(k), P_abs(k), direct(4))
+            call ice%calc_cp(T_K(k), P_abs(k), direct(5))
+            ! The memo fills every saturation quantity from one call with these outputs.
+            call water%calc_saturation_properties(max(T_K(k), 273.16d0), rho_vap=direct(6), drho_dT_vap=unused(1), &
+                                                  drho_dP_vap=unused(2), density_dT_vap=unused(3), cp_vap=unused(4), &
+                                                  dcp_dT_vap=unused(5), latent_heat=direct(7), dlatent_heat_dT=unused(6))
+            call water%calc_dcp_dT(T_K(k), P_abs(k), direct(8))
+            call water%calc_dcp_dp(T_K(k), P_abs(k), direct(9))
+            ! Suction holds the pressure at atmospheric, so the pressure derivative is zero there.
+            if (pressures(k) < 0.0d0) direct(9) = 0.0d0
+            call self%check_true("IAPWS memo returns the IAPWS values", all(memo == direct))
+        end do
+    end subroutine test_iapws_memo
 
     subroutine test_saturation_pressure(self)
         implicit none
@@ -1033,7 +1201,7 @@ contains
         integer(int32), parameter :: wrf_initializations = 2000
         integer(int32), parameter :: vapor_evaluations = 20000
         real(real64), parameter :: rho_g = 1000.0d0 * 9.80665d0
-        type(type_mkl_regularized_incomplete_beta) :: incomplete_beta
+        type(type_regularized_incomplete_beta) :: incomplete_beta
         type(type_config_wrf) :: wrf_config
         type(type_config_hcf) :: hcf_config
         type(holder_wrfs) :: wrf

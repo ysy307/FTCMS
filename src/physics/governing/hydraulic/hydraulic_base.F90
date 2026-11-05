@@ -115,14 +115,10 @@ contains
                                      configs_hcf=configs_hcf, &
                                      configs_gcc=configs_gcc)
 
-        if (allocated(self%iteration_capacity_bound)) deallocate (self%iteration_capacity_bound)
         if (allocated(self%specific_storage)) deallocate (self%specific_storage)
         if (num_active_materials > 0) then
-            allocate (self%iteration_capacity_bound(maxval(active_region_ids)), source=0.0d0)
             allocate (self%specific_storage(maxval(active_region_ids)), source=0.0d0)
             do i = 1, num_active_materials
-                call self%physics%calc_lscheme_capacity(active_region_ids(i), &
-                                                        self%iteration_capacity_bound(active_region_ids(i)))
                 self%specific_storage(active_region_ids(i)) = specific_storage(i)
             end do
         end if
@@ -140,29 +136,5 @@ contains
 
         enabled = self%enable_vapor_transport
     end function is_vapor_transport_enabled_hydraulic
-
-    module subroutine set_disable_capacity_regularization_hydraulic(self, disable)
-        implicit none
-        class(type_hydraulic), intent(inout) :: self
-        logical, intent(in) :: disable
-
-        self%disable_capacity_regularization = disable
-    end subroutine set_disable_capacity_regularization_hydraulic
-
-    module pure function get_capacity_regularization_hydraulic(self, material_id, nonlinear_iteration) &
-        result(value)
-        implicit none
-        class(type_hydraulic), intent(in) :: self
-        integer(int32), intent(in) :: material_id
-        integer(int32), intent(in) :: nonlinear_iteration
-        real(real64) :: value
-
-        value = 0.0d0
-        if (allocated(self%iteration_capacity_bound)) then
-            if (material_id >= 1 .and. material_id <= size(self%iteration_capacity_bound)) then
-                value = self%iteration_capacity_bound(material_id) / real(max(1, nonlinear_iteration), real64)
-            end if
-        end if
-    end function get_capacity_regularization_hydraulic
 
 end submodule hydraulic_base

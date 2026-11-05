@@ -1,7 +1,7 @@
 add_library(SOLVER_NUMERICAL_MATH STATIC)
 
 target_sources(SOLVER_NUMERICAL_MATH PRIVATE
-    special_functions_mkl.F90
+    special_functions.F90
 )
 
 target_include_directories(SOLVER_NUMERICAL_MATH PUBLIC

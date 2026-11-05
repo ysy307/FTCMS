@@ -1,0 +1,133 @@
+{
+    "simulation_settings": {
+        "title": "Soil column for the verification cases",
+        "calculate_type": 2
+    },
+    "analysis_controls": {
+        "calculate_thermal": true,
+        "calculate_hydraulic": true,
+        "calculate_mechanical": false,
+        "enable_vapor_transport": false,
+        "coupling_mode": "monolithic"
+    },
+    "geometry_settings": {
+        "mesh_file_name": "column.msh"
+    },
+    "materials": [
+        {
+            "id": 1,
+            "name": "soil",
+            "calculate_thermal": true,
+            "calculate_hydraulic": true,
+            "calculate_mechanical": false,
+            "phase": 4,
+            "density": {
+                "value": [
+                    2800.0,
+                    1000.0,
+                    917.0,
+                    0.6
+                ]
+            },
+            "specific_heat": {
+                "value": [
+                    912.0,
+                    4180.0,
+                    2100.0,
+                    2098.0
+                ]
+            },
+            "volumetric_heat_capacity": {
+                "value": [
+                    2553600.0,
+                    4180000.0,
+                    1925700.0,
+                    1259000.0
+                ],
+                "params": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "thermal_conductivity": {
+                "is_dispersed": false,
+                "value": [
+                    3.78,
+                    0.6,
+                    2.2,
+                    0.0241
+                ],
+                "dispersivity": [
+                    1.0,
+                    0.1
+                ],
+                "params": [
+                    0.55,
+                    0.8,
+                    3.07,
+                    0.13,
+                    13.05,
+                    1.06
+                ]
+            },
+            "phase_change": {
+                "equilibrium_model": {
+                    "segregation": false
+                }
+            },
+            "water_characteristic_curve": {
+                "model": "VG",
+                "unit": "m",
+                "theta_s": 0.535,
+                "theta_r": 0.05,
+                "alpha1": 1.11,
+                "n1": 1.48,
+                "m1": 0.2,
+                "l": 0.5
+            },
+            "hydraulic_conductivity_model": {
+                "model_number": 4,
+                "saturated_conductivity": 3.2e-06,
+                "impedance_factor": 7,
+                "water_viscosity_model": 1,
+                "gain_factor": 1.0
+            },
+            "hydraulic_storage": {
+                "specific_storage": 2.3e-06
+            }
+        }
+    ],
+    "solver_settings": {
+        "bdf_order": 2,
+        "nonlinear_solver": {
+            "max_iterations": 30,
+            "convergence": {
+                "use_criteria": "conserved",
+                "norm_type": "linf",
+                "conserved": {
+                    "thermal": {
+                        "absolute_tolerance": 100.0
+                    },
+                    "hydraulic": {
+                        "absolute_tolerance": 0.001
+                    },
+                    "relative_tolerance": 0.001,
+                    "residual_ratio_tolerance": 0.1
+                }
+            }
+        }
+    },
+    "discretization_settings": {
+        "thermal": {
+            "space": "lagrange",
+            "degree": 1,
+            "coefficient_evaluation": "quadrature"
+        },
+        "hydraulic": {
+            "space": "lagrange",
+            "degree": 1,
+            "coefficient_evaluation": "nodal"
+        }
+    }
+}

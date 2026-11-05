@@ -1,0 +1,52 @@
+{
+    "field_output": {
+        "file_format": "vtu",
+        "output_time_unit": "day",
+        "output_interval": {
+            "unit": "hour",
+            "value": 3.0
+        },
+        "variables": [
+            "temperature",
+            "pressure",
+            "water_content",
+            "ice_content",
+            "water_flux"
+        ]
+    },
+    "history_output": {
+        "file_format": "dat",
+        "output_time_unit": "day",
+        "observation_type": "coordinates",
+        "output_interval": {
+            "unit": "hour",
+            "value": 1.0
+        },
+        "variables": [
+            "temperature",
+            "pressure",
+            "water_content",
+            "water_flux",
+            "ice_content"
+        ],
+        "coordinates": [
+            {
+                "x": 0.04,
+                "y": 0.0,
+                "z": 0.19
+            },
+            {
+                "x": 0.04,
+                "y": 0.0,
+                "z": 0.1
+            }
+        ]
+    },
+    "standard_output": {
+        "print_progress": true,
+        "print_interval": {
+            "unit": "hour",
+            "value": 1.0
+        }
+    }
+}

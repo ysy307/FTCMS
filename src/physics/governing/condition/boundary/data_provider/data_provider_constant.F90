@@ -37,7 +37,7 @@ contains
         implicit none
         class(type_bc_data_constant), intent(inout) :: self
         real(real64), intent(in) :: current_time
-        real(real64), intent(inout) :: values(3)
+        real(real64), intent(inout) :: values(BC_DATA_SIZE)
 
         values = 0.0d0
         values(1:self%data_size) = self%constant_values(1:self%data_size)

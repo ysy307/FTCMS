@@ -136,8 +136,10 @@ contains
         type(json_file), intent(inout) :: json !! JSON parser
         integer(int32), intent(in) :: i_material !! Material index
 
-        character(256) :: buffer(5) = [character(256) :: "", "", "", "", ""]
+        character(256) :: buffer(5)
 
+        ! Assigned here, not in the declaration: an initialiser would SAVE it across materials.
+        buffer(:) = ""
         buffer(1) = materials//"("//to_string(i_material)//")"
 
         buffer(2) = density
@@ -215,9 +217,11 @@ contains
         type(json_file), intent(inout) :: json !! JSON parser
         integer(int32), intent(in) :: i_material !! Material index
 
-        character(256) :: buffer(3) = [character(256) :: "", "", ""]
+        character(256) :: buffer(3)
 
         associate (hydraulic_conductivity => self%materials(i_material)%hydraulic_conductivity_model)
+            ! Assigned here, not in the declaration: an initialiser would SAVE it across materials.
+            buffer(:) = ""
             buffer(1) = materials//"("//to_string(i_material)//")"
             buffer(2) = hydraulic_conductivity_model
 
@@ -249,8 +253,10 @@ contains
         type(json_file), intent(inout) :: json
         integer(int32), intent(in) :: i_material
 
-        character(256) :: buffer(3) = [character(256) :: "", "", ""]
+        character(256) :: buffer(3)
 
+        ! Assigned here, not in the declaration: an initialiser would SAVE it across materials.
+        buffer(:) = ""
         buffer(1) = materials//"("//to_string(i_material)//")"
         buffer(2) = hydraulic_storage
         buffer(3) = specific_storage
@@ -264,12 +270,14 @@ contains
         type(json_file), intent(inout) :: json !! JSON parser
         integer(int32), intent(in) :: i_material !! Material index
 
-        character(256) :: buffer(3) = [character(256) :: "", "", ""]
+        character(256) :: buffer(3)
         logical :: found
         integer(int32) :: nul_pos
 
         character(:), allocatable :: tmp_strings
 
+        ! Assigned here, not in the declaration: an initialiser would SAVE it across materials.
+        buffer(:) = ""
         buffer(1) = materials//"("//to_string(i_material)//")"
         buffer(2) = water_characteristic_curve
 

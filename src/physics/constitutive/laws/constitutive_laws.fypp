@@ -1,0 +1,310 @@
+#:include "sympy.fypp"
+#:mute
+    #! Every law below is stated once, as a SymPy expression; sympy.fypp expands
+    #! it into evaluate_<law> and evaluate_<law>_tangent. A law is the smooth
+    #! formula on one branch of a model: branch selection (a saturated head, an
+    #! absent phase, a capped ratio) stays in the hand-written model.
+
+    #! ---- Relative permeability of the retention models ----------------------
+
+    #! Brooks-Corey: h < h_b.
+    #:set h = sympy_real('h')
+    #:set h_b = sympy_real('air_entry_head')
+    #:set n = sympy_real('n')
+    #:set l = sympy_real('l')
+    #:set KR_BROOKS_COREY = sympy_law('kr_brooks_corey', &
+        & 'Brooks-Corey-Burdine relative permeability below the air-entry head.', &
+        & r'S_e=(h/h_b)^{-n},\qquad k_r=S_e^{2/n+l+2}', r'\(h<h_b<0\).', &
+        & [(h_b, r'Air-entry head \(h_b\), m, negative.'), (n, r'Pore-size index \(n>0\).'), &
+        &  (l, r'Tortuosity exponent \(l\).')], &
+        & [(h, r'Pressure head \(h\), m.')], &
+        & [('kr', ((h / h_b)**(-n))**(2 / n + l + 2), r'Relative permeability \(k_r\).')])
+
+    #! van Genuchten families: h < 0, y = (-alpha h)^n, and 1 - S_e^{1/m} = y/(1+y) exactly.
+    #:set h = sympy_real('h', negative=True)
+    #:set alpha = sympy_real('alpha', positive=True)
+    #:set n = sympy_real('n', positive=True)
+    #:set m = sympy_real('m', positive=True)
+    #:set l = sympy_real('l')
+    #:set head = (h, r'Pressure head \(h\), m, negative.')
+    #:set vg_parameters = [(alpha, r'Inverse air-entry head \(\alpha\), 1/m, positive.'), (n, r'Shape exponent \(n>1\).'), &
+        & (m, r'Shape exponent \(m>0\).'), (l, r'Tortuosity exponent \(l\).')]
+    #:set y = (-alpha * h)**n
+    #:set saturation = (1 + y)**(-m)
+    #:set KR_VAN_GENUCHTEN = sympy_law('kr_van_genuchten', &
+        & r'van Genuchten-Mualem relative permeability in closed form, for \(m=1-1/n\).', &
+        & r'y=(-\alpha h)^n,\quad S_e=(1+y)^{-m},\qquad k_r=S_e^{l}\left[1-\left(\tfrac{y}{1+y}\right)^m\right]^2', &
+        & r'\(h<0\); \(1-S_e^{1/m}\) is written as \(y/(1+y)\), which it equals exactly.', &
+        & vg_parameters, [head], &
+        & [('kr', saturation**l * (1 - (y / (1 + y))**m)**2, r'Relative permeability \(k_r\).')])
+
+    #:set VAN_GENUCHTEN_MUALEM_ARGUMENT = sympy_law('van_genuchten_mualem_argument', &
+        & 'Argument of the incomplete beta function of the van Genuchten-Mualem integral.', &
+        & r'\zeta=S_e^{1/m}=\frac{1}{1+(-\alpha h)^n}', r'\(h<0\).', &
+        & vg_parameters[:2], [head], &
+        & [('zeta', 1 / (1 + y), r'Argument \(\zeta\) of \(I_\zeta(m+1/n,1-1/n)\).')], tangent=False)
+
+    #! The incomplete beta value I comes from the caller. Its derivative is written
+    #! in y, dI/dy = -B(a,b)^{-1} y^{b-1} (1+y)^{-a-b}, rather than in 1 - zeta,
+    #! which cancels as the head approaches saturation.
+    #:set a = sympy_real('a', positive=True)
+    #:set b = sympy_real('b', positive=True)
+    #:set log_normalization = sympy_real('log_normalization')
+    #:set beta_value = sympy_real('beta_value')
+    #:set KR_VAN_GENUCHTEN_MUALEM = sympy_law('kr_van_genuchten_mualem', &
+        & r'van Genuchten-Mualem relative permeability for independent \(m\) and \(n\).', &
+        & r'k_r=S_e^{l}\,I_\zeta(a,b)^2,\qquad a=m+1/n,\quad b=1-1/n', &
+        & r'\(h<0\), \(n>1\); `beta_value` is \(I_\zeta(a,b)\) at the same head, and its derivative is ' &
+        & + r'\(B(a,b)^{-1}\zeta^{a-1}(1-\zeta)^{b-1}\).', &
+        & vg_parameters + [(a, r'First beta parameter \(a=m+1/n\).'), (b, r'Second beta parameter \(b=1-1/n\).'), &
+        &                  (log_normalization, r'\(-\ln B(a,b)\).')], &
+        & [head], &
+        & [('kr', saturation**l * beta_value**2, r'Relative permeability \(k_r\).')], &
+        & evaluated=[(beta_value, r'\(I_\zeta(a,b)\) at \(\zeta\) of `evaluate_van_genuchten_mualem_argument`.', &
+        &             [-sp.exp(log_normalization) * y**(b - 1) * (1 + y)**(-a - b) * sp.diff(y, h)])])
+
+    #! Modified van Genuchten (Vogel): h < h_crit, normalised at h_crit.
+    #:set h = sympy_real('h')
+    #:set alpha = sympy_real('alpha')
+    #:set n = sympy_real('n', positive=True)
+    #:set m = sympy_real('m', positive=True)
+    #:set l = sympy_real('l')
+    #:set h_crit = sympy_real('critical_head')
+    #:set y = sp.Abs(alpha * h)**n
+    #:set y_crit = sp.Abs(alpha * h_crit)**n
+    #:set KR_MODIFIED_VAN_GENUCHTEN = sympy_law('kr_modified_van_genuchten', &
+        & 'Modified van Genuchten-Mualem relative permeability below the critical head.', &
+        & r'S=(1+|\alpha h|^n)^{-m},\qquad k_r=\left(\frac{S}{S_c}\right)^{l} ' &
+        & + r'\frac{\left[1-\left(1-S^{1/m}\right)^m\right]^2} {\left[1-\left(1-S_c^{1/m}\right)^m\right]^2}', &
+        & r'\(h<h_c\), \(h\ne0\); \(S_c\) is \(S\) at \(h_c\).', &
+        & [(alpha, r'Inverse air-entry head \(\alpha\), 1/m.'), (n, r'Shape exponent \(n>1\).'), &
+        &  (m, r'Shape exponent \(m>0\).'), (l, r'Tortuosity exponent \(l\).'), (h_crit, r'Critical head \(h_c\), m.')], &
+        & [(h, r'Pressure head \(h\), m.')], &
+        & [('kr', ((1 + y)**(-m) / (1 + y_crit)**(-m))**l * (1 - (y / (1 + y))**m)**2 / (1 - (y_crit / (1 + y_crit))**m)**2, &
+        &   r'Relative permeability \(k_r\).')])
+
+    #! Kosugi log-normal: h < 0.
+    #:set h = sympy_real('h')
+    #:set h_m = sympy_real('median_head')
+    #:set sigma = sympy_real('sigma', positive=True)
+    #:set l = sympy_real('l')
+    #:set root_two = sympy_real('root_two', positive=True)
+    #:set u = sp.log(h / h_m) / (sigma * root_two)
+    #:set KR_KOSUGI = sympy_law('kr_kosugi', 'Kosugi log-normal relative permeability.', &
+        & r'u=\frac{\ln(h/h_m)}{\sigma\sqrt2},\quad S_e=\tfrac12\operatorname{erfc}u,\qquad ' &
+        & + r'k_r=S_e^{l}\left[\tfrac12\operatorname{erfc}\left(u+\sigma/\sqrt2\right)\right]^2', &
+        & r'\(h<0\) and \(h_m<0\).', &
+        & [(h_m, r'Median head \(h_m\), m, negative.'), (sigma, r'Log-normal width \(\sigma>0\).'), &
+        &  (l, r'Tortuosity exponent \(l\).')], &
+        & [(h, r'Pressure head \(h\), m, negative.')], &
+        & [('kr', (sp.erfc(u) / 2)**l * (sp.erfc(u + sigma / root_two) / 2)**2, r'Relative permeability \(k_r\).')], &
+        & constants=[(root_two, 'sqrt(2.0d0)', 'The square root of two.')])
+
+    #! Durner dual porosity: h < 0; with alpha2 = alpha1 it is the dual van
+    #! Genuchten model with a common alpha.
+    #:set h = sympy_real('h', negative=True)
+    #:set alpha1 = sympy_real('alpha1', positive=True)
+    #:set n1 = sympy_real('n1', positive=True)
+    #:set m1 = sympy_real('m1', positive=True)
+    #:set alpha2 = sympy_real('alpha2', positive=True)
+    #:set n2 = sympy_real('n2', positive=True)
+    #:set m2 = sympy_real('m2', positive=True)
+    #:set w1 = sympy_real('w1')
+    #:set w2 = sympy_real('w2')
+    #:set l = sympy_real('l')
+    #:set y1 = (-alpha1 * h)**n1
+    #:set y2 = (-alpha2 * h)**n2
+    #:set KR_DURNER = sympy_law('kr_durner', 'Durner dual-porosity Mualem relative permeability.', &
+        & r'S_i=\left(1+(-\alpha_i h)^{n_i}\right)^{-m_i},\qquad k_r=(w_1S_1+w_2S_2)^{l} ' &
+        & + r'\left[\frac{\sum_i w_i\alpha_i\left(1-\left(1-S_i^{1/m_i}\right)^{m_i}\right)} {\sum_i w_i\alpha_i}\right]^2', &
+        & r'\(h<0\); \(1-S_i^{1/m_i}\) is written as \(y_i/(1+y_i)\), which it equals exactly.', &
+        & [(alpha1, r'Inverse air-entry head of the first pore system, 1/m.'), &
+        &  (n1, r'Shape exponent \(n_1\) of the first pore system.'), &
+        &  (m1, r'Shape exponent \(m_1\) of the first pore system.'), &
+        &  (alpha2, r'Inverse air-entry head of the second pore system, 1/m.'), &
+        &  (n2, r'Shape exponent \(n_2\) of the second pore system.'), &
+        &  (m2, r'Shape exponent \(m_2\) of the second pore system.'), &
+        &  (w1, r'Weight \(w_1\) of the first pore system.'), (w2, r'Weight \(w_2\) of the second pore system.'), &
+        &  (l, r'Tortuosity exponent \(l\).')], &
+        & [(h, r'Pressure head \(h\), m, negative.')], &
+        & [('kr', (w1 * (1 + y1)**(-m1) + w2 * (1 + y2)**(-m2))**l &
+        &   * (w1 * alpha1 * (1 - (y1 / (1 + y1))**m1) + w2 * alpha2 * (1 - (y2 / (1 + y2))**m2))**2 &
+        &   / (w1 * alpha1 + w2 * alpha2)**2, r'Relative permeability \(k_r\).')])
+
+    #! ---- Liquid viscosity, ice impedance ------------------------------------
+
+    #:set temperature = sympy_real('temperature')
+    #:set kelvin = (sympy_real('kelvin', positive=True), '273.15d0', 'Celsius to kelvin, K.')
+    #:set scale = sympy_real('viscosity_scale')
+    #:set activation = sympy_real('activation')
+    #:set WATER_VISCOSITY_EXPONENTIAL = sympy_law('water_viscosity_exponential', &
+        & 'Dynamic viscosity of liquid water, exponential in the inverse absolute temperature.', &
+        & r'\mu=2.1\times10^{-6}\exp\left(\frac{1808.5}{T+273.15}\right)', r'\(T>-273.15\) C.', &
+        & [], [(temperature, r'Temperature \(T\), C.')], &
+        & [('viscosity', scale * sp.exp(activation / (temperature + kelvin[0])), r'Viscosity \(\mu\), Pa s.')], &
+        & constants=[(scale, '2.1d-6', 'Viscosity scale, Pa s.'), &
+        &            (activation, '1808.5d0', 'Activation temperature, K.'), kelvin])
+
+    #:set singular = sympy_real('singular_temperature')
+    #:set exponent = sympy_real('exponent')
+    #:set WATER_VISCOSITY_SUPERCOOLED = sympy_law('water_viscosity_supercooled', &
+        & 'Dynamic viscosity of liquid water, singular at the supercooling limit.', &
+        & r'\mu=1.3788\times10^{-4}\left(\frac{T+273.15}{225.66}-1\right)^{-1.6438}', r'\(T>-47.49\) C.', &
+        & [], [(temperature, r'Temperature \(T\), C.')], &
+        & [('viscosity', scale * ((temperature + kelvin[0]) / singular - 1)**exponent, r'Viscosity \(\mu\), Pa s.')], &
+        & constants=[(scale, '1.3788d-4', 'Viscosity scale, Pa s.'), &
+        &            (singular, '225.66d0', 'Singular temperature, K.'), &
+        &            (exponent, '-1.6438d0', 'Power-law exponent.'), kelvin])
+
+    #:set theta_w = sympy_real('theta_w')
+    #:set theta_i = sympy_real('theta_i')
+    #:set theta_r = sympy_real('theta_r')
+    #:set omega = sympy_real('omega')
+    #:set ratio = sympy_real('ratio')
+    #:set ICE_IMPEDANCE_RATIO = sympy_law('ice_impedance_ratio', &
+        & 'Ice fraction of the mobile water that the impedance factor is evaluated at.', &
+        & r'Q=\frac{\theta_i}{\theta_w+\theta_i-\theta_r}', r'\(\theta_w+\theta_i>\theta_r\).', &
+        & [(theta_r, r'Residual water content \(\theta_r\).')], &
+        & [(theta_w, r'Liquid water content \(\theta_w\).'), (theta_i, r'Ice content \(\theta_i\).')], &
+        & [('ratio', theta_i / (theta_w + theta_i - theta_r), r'Ice ratio \(Q\).')])
+    #:set ICE_IMPEDANCE = sympy_law('ice_impedance', 'Hansson ice impedance factor of the hydraulic conductivity.', &
+        & r'f=10^{-\Omega Q}', 'None.', &
+        & [(omega, r'Impedance factor \(\Omega\).')], &
+        & [(ratio, r'Ice ratio \(Q\) of `evaluate_ice_impedance_ratio`.')], &
+        & [('factor', 10**(-omega * ratio), r'Impedance factor \(f\).')])
+
+    #! ---- Thermal conductivity ------------------------------------------------
+
+    #:set PHASES = ['solid', 'water', 'ice', 'gas']
+    #:set thermal_conductivity_geometric = lambda count: sympy_law('thermal_conductivity_geometric{}'.format(count), &
+        & 'Geometric-mean thermal conductivity of {} phases.'.format(count), &
+        & r'\lambda=\prod_{k=1}^{' + str(count) + r'}\lambda_k^{\phi_k}', 'Positive phase conductivities.', &
+        & [(sympy_real('lambda_' + phase, positive=True), r'Conductivity of the {} phase, W/(m K).'.format(phase)) &
+        &  for phase in PHASES[:count]], &
+        & [(sympy_real('phi_' + phase), r'Volume fraction of the {} phase.'.format(phase)) for phase in PHASES[:count]], &
+        & [('conductivity', sp.Mul(*[sympy_real('lambda_' + phase, positive=True)**sympy_real('phi_' + phase) &
+        &   for phase in PHASES[:count]]), r'Bulk conductivity \(\lambda\), W/(m K).')])
+
+    #:set theta_i = sympy_real('theta_i', nonnegative=True)
+    #:set c1 = sympy_real('c1')
+    #:set c2 = sympy_real('c2')
+    #:set c3 = sympy_real('c3')
+    #:set c4 = sympy_real('c4')
+    #:set f1 = sympy_real('f1')
+    #:set f2 = sympy_real('f2')
+    #:set theta = theta_w + (1 + f1 * theta_i**f2) * theta_i
+    #:set THERMAL_CONDUCTIVITY_CAMPBELL_HANSSON = sympy_law('thermal_conductivity_campbell_hansson', &
+        & 'Campbell thermal conductivity with the frozen-soil extension of Hansson et al. (2004).', &
+        & r'F=1+F_1\theta_i^{F_2},\quad \vartheta=\theta_w+F\theta_i,\qquad ' &
+        & + r'\lambda=C_1+C_2\vartheta-(C_1-C_4)\exp\left[-(C_3\vartheta)^4\right]', &
+        & r'\(\theta_i\ge0\); \(\theta_w\) is the liquid content only.', &
+        & [(c1, r'\(C_1\), W/(m K).'), (c2, r'\(C_2\), W/(m K).'), (c3, r'\(C_3\).'), (c4, r'\(C_4\), W/(m K).'), &
+        &  (f1, r'\(F_1\).'), (f2, r'\(F_2\).')], &
+        & [(theta_w, r'Liquid water content \(\theta_w\).'), (theta_i, r'Ice content \(\theta_i\).')], &
+        & [('conductivity', c1 + c2 * theta - (c1 - c4) * sp.exp(-(c3 * theta)**4), &
+        &   r'Bulk conductivity \(\lambda\), W/(m K).')])
+
+    #! ---- Generalized Clapeyron freezing suction -----------------------------
+
+    #:set temperature_k = sympy_real('temperature_k', positive=True)
+    #:set pressure = sympy_real('pressure')
+    #:set rho_w = sympy_real('rho_w', positive=True)
+    #:set rho_i = sympy_real('rho_i', positive=True)
+    #:set latent_fusion = sympy_real('latent_fusion')
+    #:set freezing_point = sympy_real('freezing_point', positive=True)
+    #:set clapeyron_parameters = [(latent_fusion, r'Latent heat of fusion \(L_f\), J/kg.'), &
+        & (freezing_point, r'Freezing point \(T_0\), K.')]
+    #:set FREEZING_SUCTION = sympy_law('freezing_suction', &
+        & 'Generalized Clapeyron freezing suction of pore water against unstressed ice.', &
+        & r's_f=-L_f\,\rho_w\ln\frac{T}{T_0}', r'\(T>0\) K; signed, negative above the freezing point.', &
+        & clapeyron_parameters, &
+        & [(temperature_k, r'Absolute temperature \(T\), K.'), (rho_w, r'Liquid density \(\rho_w\), kg/m3.')], &
+        & [('suction', -latent_fusion * rho_w * sp.log(temperature_k / freezing_point), r'Freezing suction \(s_f\), Pa.')])
+    #:set FREEZING_SUCTION_SEGREGATION = sympy_law('freezing_suction_segregation', &
+        & 'Generalized Clapeyron freezing suction with the ice pressure following the pore pressure.', &
+        & r's_f=\left(\frac{\rho_i}{\rho_w}-1\right)p_w-L_f\,\rho_i\ln\frac{T}{T_0}', &
+        & r'\(T>0\) K, on the frozen branch \(T\le T_0\).', &
+        & clapeyron_parameters, &
+        & [(pressure, r'Pore pressure \(p_w\), Pa.'), (temperature_k, r'Absolute temperature \(T\), K.'), &
+        &  (rho_w, r'Liquid density \(\rho_w\), kg/m3.'), (rho_i, r'Ice density \(\rho_i\), kg/m3.')], &
+        & [('suction', (rho_i / rho_w - 1) * pressure - latent_fusion * rho_i * sp.log(temperature_k / freezing_point), &
+        &   r'Freezing suction \(s_f\), Pa.')])
+
+    #! ---- Stored water and enthalpy -----------------------------------------
+
+    #:set theta_i = sympy_real('theta_i')
+    #:set theta_v = sympy_real('theta_v')
+    #:set rho_w = sympy_real('rho_w')
+    #:set rho_i = sympy_real('rho_i')
+    #:set c_w = sympy_real('c_w')
+    #:set c_i = sympy_real('c_i')
+    #:set c_v = sympy_real('c_v')
+    #:set latent_vapor = sympy_real('latent_vapor')
+    #:set solid = sympy_real('solid_heat_capacity')
+    #:set storage = sympy_real('compressive_storage')
+    #:set ENTHALPY_DENSITY = sympy_law('enthalpy_density', 'Enthalpy density of a soil with liquid, ice and vapour water.', &
+        & r'U=C_sT+\rho_wc_w\theta_wT+\rho_ic_i\theta_iT-L_f\rho_i\theta_i+\rho_wc_v\theta_vT+L_v\rho_w\theta_v', &
+        & 'Temperature in C, the datum of the enthalpy; the vapour content is liquid-equivalent.', &
+        & [(solid, r'Solid heat capacity per bulk volume \(C_s=\rho_sc_s(1-\phi)\), J/(m3 K).'), &
+        &  (latent_fusion, r'Latent heat of fusion \(L_f\), J/kg.')], &
+        & [(temperature, r'Temperature \(T\), C.'), (theta_w, r'Liquid water content \(\theta_w\).'), &
+        &  (theta_i, r'Ice content \(\theta_i\).'), (theta_v, r'Liquid-equivalent vapour content \(\theta_v\).'), &
+        &  (rho_w, r'Liquid density \(\rho_w\), kg/m3.'), (c_w, r'Liquid specific heat \(c_w\), J/(kg K).'), &
+        &  (rho_i, r'Ice density \(\rho_i\), kg/m3.'), (c_i, r'Ice specific heat \(c_i\), J/(kg K).'), &
+        &  (c_v, r'Vapour specific heat \(c_v\), J/(kg K).'), (latent_vapor, r'Latent heat of vaporization \(L_v\), J/kg.')], &
+        & [('enthalpy', solid * temperature + rho_w * c_w * theta_w * temperature + rho_i * c_i * theta_i * temperature &
+        &   - latent_fusion * rho_i * theta_i + rho_w * c_v * theta_v * temperature + latent_vapor * rho_w * theta_v, &
+        &   r'Enthalpy density \(U\), J/m3.')])
+    #:set TOTAL_STORED_WATER = sympy_law('total_stored_water', 'Liquid-equivalent water stored per unit bulk volume.', &
+        & r'W=\theta_w+\frac{\rho_i}{\rho_w}\theta_i+\theta_v+S_c', r'\(\rho_w>0\).', &
+        & [], &
+        & [(theta_w, r'Liquid water content \(\theta_w\).'), (theta_i, r'Ice content \(\theta_i\).'), &
+        &  (theta_v, r'Liquid-equivalent vapour content \(\theta_v\).'), (rho_w, r'Liquid density \(\rho_w\), kg/m3.'), &
+        &  (rho_i, r'Ice density \(\rho_i\), kg/m3.'), (storage, r'Compressive storage \(S_c\).')], &
+        & [('stored_water', theta_w + rho_i / rho_w * theta_i + theta_v + storage, r'Stored water \(W\).')])
+
+    #:set LAWS = [KR_BROOKS_COREY, KR_VAN_GENUCHTEN, VAN_GENUCHTEN_MUALEM_ARGUMENT, KR_VAN_GENUCHTEN_MUALEM, &
+        & KR_MODIFIED_VAN_GENUCHTEN, KR_KOSUGI, KR_DURNER, WATER_VISCOSITY_EXPONENTIAL, WATER_VISCOSITY_SUPERCOOLED, &
+        & ICE_IMPEDANCE_RATIO, ICE_IMPEDANCE] + [thermal_conductivity_geometric(count) for count in (2, 3, 4)] &
+        & + [THERMAL_CONDUCTIVITY_CAMPBELL_HANSSON, FREEZING_SUCTION, FREEZING_SUCTION_SEGREGATION, ENTHALPY_DENSITY, &
+        & TOTAL_STORED_WATER]
+#:endmute
+!> Closed-form constitutive laws and their exact tangents.
+!>
+!> Every law of this module is stated once, as a SymPy expression in this
+!> file. `sympy.fypp` expands each into two pure routines: `evaluate_<law>`
+!> returns the value, and `evaluate_<law>_tangent` returns the value together
+!> with
+!>
+!> \[
+!>   \mathrm{d}f=\sum_k\frac{\partial f}{\partial x_k}\,\mathrm{d}x_k
+!> \]
+!>
+!> in every direction the caller carries a tangent for. The partials are
+!> `sympy.diff` of the stated expression, and `sympy.cse` shares their common
+!> subexpressions with the value. The models call these routines for both the
+!> value and the tangent, so the two cannot disagree. Branch selection stays
+!> with the models: a law is the smooth formula on one branch.
+module constitutive_laws
+    use, intrinsic :: iso_fortran_env, only: real64
+    implicit none
+    private
+
+#:for law in LAWS
+    public :: evaluate_${law['name']}$
+    #:if law['tangent']
+    public :: evaluate_${law['name']}$_tangent
+    #:endif
+#:endfor
+
+contains
+
+#:for law in LAWS
+$:sympy_value_routine(law)
+
+    #:if law['tangent']
+$:sympy_tangent_routine(law)
+
+    #:endif
+#:endfor
+end module constitutive_laws

@@ -30,9 +30,11 @@ contains
         implicit none
         class(type_bc_data_dynamic), intent(inout) :: self
         real(real64), intent(in) :: current_time
-        real(real64), intent(inout) :: values(3)
+        real(real64), intent(inout) :: values(BC_DATA_SIZE)
 
-        values(1:3) = self%current_buffer(1:3)
+        values = 0.0d0
+        values(1:min(BC_DATA_SIZE, size(self%current_buffer))) = &
+            self%current_buffer(1:min(BC_DATA_SIZE, size(self%current_buffer)))
     end subroutine get_data_bc_data_dynamic
 
 end submodule data_provider_dynamic

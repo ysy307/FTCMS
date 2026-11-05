@@ -12,6 +12,7 @@ module core_interop_petscfe
     public :: petscfe_tabulate
     public :: petscfe_field_size
     public :: petscfe_evaluate_cell
+    public :: petscfe_evaluate_cell_gradient
     public :: petscfe_reference_coordinates
     public :: petscfe_quadrature
 
@@ -54,6 +55,22 @@ module core_interop_petscfe
             real(c_double), intent(inout) :: divergence(*)
             integer(c_int) :: ierr
         end function ftcms_petscfe_evaluate_cell
+
+        function ftcms_petscfe_evaluate_cell_gradient(dm, local_x, field, cell, num_points, ref_points, &
+                                                      values, gradients) &
+            bind(c, name="ftcms_petscfe_evaluate_cell_gradient") result(ierr)
+            import :: c_int, c_double, c_ptr
+            implicit none
+            type(c_ptr), value :: dm
+            type(c_ptr), value :: local_x
+            integer(c_int), value :: field
+            integer(c_int), value :: cell
+            integer(c_int), value :: num_points
+            real(c_double), intent(in) :: ref_points(*)
+            real(c_double), intent(inout) :: values(*)
+            real(c_double), intent(inout) :: gradients(*)
+            integer(c_int) :: ierr
+        end function ftcms_petscfe_evaluate_cell_gradient
 
         function ftcms_petscfe_quadrature(dm, field, max_points, num_points, order, points, weights) &
             bind(c, name="ftcms_petscfe_quadrature") result(ierr)
@@ -136,6 +153,24 @@ contains
         ierr = ftcms_petscfe_evaluate_cell(dm, local_x, field, cell, int(size(ref_points, 2), c_int), &
                                            ref_points, values, divergence)
     end subroutine petscfe_evaluate_cell
+
+    !> One field's values and physical gradients at reference points of one cell.
+    !>
+    !> values is (Nc, num_points) and gradients (dim, Nc, num_points).
+    subroutine petscfe_evaluate_cell_gradient(dm, local_x, field, cell, ref_points, values, gradients, ierr)
+        implicit none
+        type(c_ptr), intent(in) :: dm
+        type(c_ptr), intent(in) :: local_x
+        integer(c_int), intent(in) :: field
+        integer(c_int), intent(in) :: cell
+        real(c_double), intent(in), contiguous :: ref_points(:, :)
+        real(c_double), intent(inout), contiguous :: values(:, :)
+        real(c_double), intent(inout), contiguous :: gradients(:, :, :)
+        integer(c_int), intent(inout) :: ierr
+
+        ierr = ftcms_petscfe_evaluate_cell_gradient(dm, local_x, field, cell, int(size(ref_points, 2), c_int), &
+                                                    ref_points, values, gradients)
+    end subroutine petscfe_evaluate_cell_gradient
 
     !> The quadrature rule one field of a DM is integrated with.
     !>

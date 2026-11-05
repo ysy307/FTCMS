@@ -1,6 +1,5 @@
 module io_input_basic
     use, intrinsic :: iso_fortran_env
-!$  use :: omp_lib
     use :: core_parallel_mpi
     use :: stdlib_strings, only:to_string, strip, ends_with
     use :: stdlib_logger
@@ -250,24 +249,12 @@ module io_input_basic
         character(len=512) :: petsc_options = ''
     end type type_linear_solver
 
-    type :: type_parallel_threads
-        logical :: is_parallel
-        integer(int32) :: num_threads
-        character(:), allocatable :: schedule
-        integer(int32) :: max_active_levels
-    end type type_parallel_threads
-
-    type :: type_parallel_settings
-        type(type_parallel_threads) :: threads
-    end type type_parallel_settings
-
     type :: type_solver_settings
         integer(int32) :: bdf_order
         character(:), allocatable :: reordering
         character(:), allocatable :: coloring
         type(type_nonlinear_solver) :: nonlinear_solver
         type(type_linear_solver) :: linear_solver
-        type(type_parallel_settings) :: parallel_settings
     contains
         procedure, pass(self) :: display => display_parameters_solver_settings
     end type
@@ -279,6 +266,31 @@ module io_input_basic
         end subroutine display_parameters_solver_settings
     end interface
     !!------------------------------------------------------------------------------------------------------------------------------
+    !> The discretisation each governing equation is solved in, indexed by `PHYSICS_TYPES` id.
+    !>
+    !> Every equation takes the same three choices, so heat, water and
+    !> deformation are configured alike: the finite element space (`FE_SPACES`
+    !> id), its polynomial degree, and where the constitutive laws are evaluated
+    !> (`COEFFICIENT_EVALUATIONS` id). Whether a combination is implemented is
+    !> decided by the engine, which refuses the ones it has no kernels for.
+    type :: type_discretization_settings
+        integer(int32) :: space(PHYSICS_TYPES%NUM_ID) = 1
+        integer(int32) :: degree(PHYSICS_TYPES%NUM_ID) = 1
+        integer(int32) :: coefficient_evaluation(PHYSICS_TYPES%NUM_ID) = 1
+        !> Whether `Basic.json` stated the block, as opposed to the defaults.
+        logical :: is_given = .false.
+    contains
+        procedure, pass(self) :: display => display_discretization_settings
+    end type type_discretization_settings
+
+    interface
+        module subroutine display_discretization_settings(self, is_active)
+            implicit none
+            class(type_discretization_settings), intent(in) :: self
+            logical, intent(in) :: is_active(:)
+        end subroutine display_discretization_settings
+    end interface
+    !!------------------------------------------------------------------------------------------------------------------------------
     type :: type_input_basic
         class(abst_input), pointer :: parent => null()
         character(:), allocatable :: file_name
@@ -288,6 +300,7 @@ module io_input_basic
         integer(int32) :: num_materials
         type(type_material_settings), allocatable :: materials(:)
         type(type_solver_settings) :: solver_settings
+        type(type_discretization_settings) :: discretization_settings
     contains
         procedure, pass(self) :: initialize => initialize_type_input_basic
         procedure, pass(self) :: display => display_input_basic
@@ -323,6 +336,12 @@ module io_input_basic
             class(type_input_basic), intent(inout) :: self
             type(json_file), intent(inout) :: json
         end subroutine read_solver_settings
+
+        module subroutine read_discretization_settings(self, json)
+            implicit none
+            class(type_input_basic), intent(inout) :: self
+            type(json_file), intent(inout) :: json
+        end subroutine read_discretization_settings
     end interface
 
     interface

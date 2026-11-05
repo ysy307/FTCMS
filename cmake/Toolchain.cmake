@@ -27,61 +27,38 @@ list(PREPEND CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/third_party/.local/${COMPI
 if(ENABLE_MPI)
     find_package(MPI REQUIRED)
 endif()
-if(ENABLE_OPENMP)
-    find_package(OpenMP REQUIRED)
+
+# 4. PETSc, found once for every library. Its BLAS and LAPACK (MKL in the
+#    Intel build) are the ones fortran_stdlib links as well.
+find_package(PkgConfig REQUIRED)
+set(ENV{PKG_CONFIG_PATH} "${PROJECT_SOURCE_DIR}/third_party/.local/${COMPILER_DIR}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+pkg_check_modules(PETSC REQUIRED IMPORTED_TARGET GLOBAL PETSc)
+add_library(PETSc::PETSc ALIAS PkgConfig::PETSC)
+# The engine hands real64 and int32 values to PETSc without conversion.
+file(READ "${PETSC_PREFIX}/include/petscconf.h" PETSC_CONF)
+if(NOT PETSC_CONF MATCHES "#define PETSC_USE_REAL_DOUBLE 1" OR PETSC_CONF MATCHES "#define PETSC_USE_(COMPLEX|64BIT_INDICES) 1")
+    message(FATAL_ERROR "FTCMS needs a PETSc with real double scalars and 32-bit indices: ${PETSC_PREFIX}")
 endif()
 
-# 4. MKL Configuration
-set(MKL_LINK static)
-set(MKL_INTERFACE lp64)
-set(MKL_SYCL_LINK OFF)
+# 5. BLAS/LAPACK: the ones PETSc was configured with, for fortran_stdlib and
+#    the ETKF's dense eigensolver. No second BLAS is linked beside PETSc's.
+file(STRINGS "${PETSC_PREFIX}/lib/petsc/conf/petscvariables" PETSC_BLASLAPACK REGEX "^BLASLAPACK_LIB =")
+string(REGEX REPLACE "^BLASLAPACK_LIB = *" "" PETSC_BLASLAPACK "${PETSC_BLASLAPACK}")
+separate_arguments(PETSC_BLASLAPACK UNIX_COMMAND "${PETSC_BLASLAPACK}")
 
-if(CMAKE_Fortran_COMPILER_ID MATCHES "Intel|IntelLLVM")
-    set(MKL_THREADING "intel_thread")
-    set(MKL_MPI "intelmpi")
-elseif(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
-    set(MKL_THREADING "gnu_thread")
-    set(MKL_MPI "openmpi")
-else()
-    set(MKL_THREADING "intel_thread")
-    set(MKL_MPI "intelmpi")
-endif()
-
-set(MKL_COMPONENTS_LIST)
-if(ENABLE_MPI)
-    set(ENABLE_SCALAPACK ON CACHE BOOL "Enable ScaLAPACK components")
-    list(APPEND MKL_COMPONENTS_LIST ScaLAPACK)
-endif()
-
-find_package(MKL CONFIG REQUIRED COMPONENTS ${MKL_COMPONENTS_LIST})
-
-# 5. Create ALIAS targets for BLAS/LAPACK to satisfy fortran_stdlib requirements
 if(NOT TARGET BLAS::BLAS)
     add_library(BLAS::BLAS INTERFACE IMPORTED)
-    target_link_libraries(BLAS::BLAS INTERFACE MKL::MKL)
+    target_link_libraries(BLAS::BLAS INTERFACE ${PETSC_BLASLAPACK})
 endif()
 
 if(NOT TARGET LAPACK::LAPACK)
     add_library(LAPACK::LAPACK INTERFACE IMPORTED)
-    target_link_libraries(LAPACK::LAPACK INTERFACE MKL::MKL)
-endif()
-
-if(NOT TARGET SPBLAS::SPBLAS)
-    add_library(mkl_spblas_lib STATIC "${MKL_ROOT}/include/mkl_spblas.f90")
-    target_include_directories(mkl_spblas_lib PRIVATE "${MKL_ROOT}/include")
-    target_link_libraries(mkl_spblas_lib PUBLIC MKL::MKL)
-    add_library(SPBLAS::SPBLAS ALIAS mkl_spblas_lib)
-endif()
-
-if(ENABLE_MPI AND NOT TARGET SCALAPACK::SCALAPACK)
-    add_library(SCALAPACK::SCALAPACK INTERFACE IMPORTED)
-    target_link_libraries(SCALAPACK::SCALAPACK INTERFACE MKL::MKL_SCALAPACK MPI::MPI_Fortran)
+    target_link_libraries(LAPACK::LAPACK INTERFACE BLAS::BLAS)
 endif()
 
 # 6. Find third-party libraries
 find_package(fortran_stdlib REQUIRED)
 find_package(${JSON_FORTRAN_PKG} REQUIRED)
-find_package(VTK REQUIRED COMPONENTS CommonCore CommonDataModel IOLegacy IOXML)
 find_package(IAPWS REQUIRED)
 if(BUILD_TESTING)
     find_package(test-drive REQUIRED)
@@ -172,26 +149,14 @@ function(enable_build_flags target)
     endif()
 
     target_compile_definitions(${target} ${KEYWORD}
-        USE_OPENMP
-        _MKL
         $<$<OR:$<CONFIG:Debug>,$<BOOL:${ENABLE_DEBUG}>>:USE_DEBUG>
     )
 
-    if(ENABLE_OPENMP)
-        target_link_libraries(${target} ${KEYWORD} OpenMP::OpenMP_Fortran)
-    endif()
-
     if(ENABLE_MPI)
         target_compile_definitions(${target} ${KEYWORD} _MPI)
-        target_link_libraries(${target} ${KEYWORD}
-            SPBLAS::SPBLAS
-            MKL::MKL_SCALAPACK
-            MPI::MPI_Fortran)
-    else()
-        target_link_libraries(${target} ${KEYWORD}
-            SPBLAS::SPBLAS
-            MKL::MKL)
+        target_link_libraries(${target} ${KEYWORD} MPI::MPI_Fortran)
     endif()
+    target_link_libraries(${target} ${KEYWORD} PETSc::PETSc LAPACK::LAPACK)
 endfunction()
 
 # =========================================================================
@@ -205,7 +170,6 @@ function(enable_thirdparty target)
     )
 
     target_link_libraries(${target} PUBLIC
-        VTK::CommonCore VTK::CommonDataModel VTK::IOLegacy VTK::IOXML
         fortran_stdlib::fortran_stdlib
         ${JSON_FORTRAN_PKG}::jsonfortran-static
         IAPWS::IAPWS

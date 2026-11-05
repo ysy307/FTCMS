@@ -1,0 +1,139 @@
+{
+    "time_controls": {
+        "simulation_period": {
+            "unit": "hour",
+            "start": 0.0,
+            "end": 2.0
+        },
+        "time_stepping": {
+            "unit": "second",
+            "initial_step": 300.0,
+            "min_step": 1.0,
+            "max_step": 30000.0
+        },
+        "adaptive_stepping": {
+            "is_active": true,
+            "iteration_control": {
+                "iteration_count_min": 5,
+                "iteration_count_max": 16,
+                "time_step_scale_up": 1.25,
+                "time_step_scale_down": 0.8,
+                "time_step_scale_retry": 0.5
+            },
+            "error_control": {
+                "is_active": true,
+                "error_relative_tolerance": 0.01,
+                "error_absolute_tolerance_temperature": 0.001,
+                "error_absolute_tolerance_pressure": 10.0,
+                "proportional_gain": 0.2,
+                "integral_gain": 0.15,
+                "safety_factor": 0.9,
+                "max_growth_rate": 2.0
+            },
+            "solution_change_control": {
+                "max_temperature_change_per_step": 5.0,
+                "max_relative_change_per_step": 0.3
+            }
+        }
+    },
+    "boundary_conditions": [
+        {
+            "id": 2,
+            "calculate_thermal": true,
+            "calculate_hydraulic": true,
+            "calculate_mechanical": false,
+            "thermal": {
+                "type": "flux",
+                "value_type": "constant",
+                "values": [
+                    0.0
+                ]
+            },
+            "hydraulic": {
+                "type": "flux",
+                "value_type": "constant",
+                "values": [
+                    0.0
+                ]
+            }
+        },
+        {
+            "id": 3,
+            "calculate_thermal": true,
+            "calculate_hydraulic": true,
+            "calculate_mechanical": false,
+            "thermal": {
+                "type": "robin",
+                "value_type": "constant",
+                "values": [
+                    3.0,
+                    6.7
+                ]
+            },
+            "hydraulic": {
+                "type": "flux",
+                "value_type": "constant",
+                "values": [
+                    0.0
+                ]
+            }
+        },
+        {
+            "id": 4,
+            "calculate_thermal": true,
+            "calculate_hydraulic": true,
+            "calculate_mechanical": false,
+            "thermal": {
+                "type": "flux",
+                "value_type": "constant",
+                "values": [
+                    0.0
+                ]
+            },
+            "hydraulic": {
+                "type": "flux",
+                "value_type": "constant",
+                "values": [
+                    0.0
+                ]
+            }
+        },
+        {
+            "id": 5,
+            "calculate_thermal": true,
+            "calculate_hydraulic": true,
+            "calculate_mechanical": false,
+            "thermal": {
+                "type": "robin",
+                "value_type": "constant",
+                "values": [
+                    28.0,
+                    -6.0
+                ]
+            },
+            "hydraulic": {
+                "type": "flux",
+                "value_type": "constant",
+                "values": [
+                    0.0
+                ]
+            }
+        }
+    ],
+    "initial_conditions": {
+        "thermal": {
+            "type": "uniform",
+            "value": 6.7,
+            "field_name": "Temperature"
+        },
+        "hydraulic": {
+            "type": "uniform",
+            "value": -44683.6901,
+            "field_name": "Pressure"
+        },
+        "porosity": {
+            "type": "uniform",
+            "value": 0.535
+        }
+    }
+}

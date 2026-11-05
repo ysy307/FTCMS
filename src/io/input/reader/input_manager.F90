@@ -1,7 +1,6 @@
 module io_input
     use, intrinsic :: iso_fortran_env, only: int32, real64, output_unit
     use :: core_parallel_mpi
-    use :: omp_lib
     use :: stdlib_strings, only:to_string, strip, ends_with
     use :: stdlib_logger
     use :: json_module, only:json_file
@@ -11,6 +10,7 @@ module io_input
     use :: io_input_conditions, only:type_conditions
     use :: io_input_output_conditions, only:type_output_settings
     use :: io_input_geometry, only:type_input_geometry
+    use :: io_input_assimilation, only:type_assimilation_settings
     ! use :: module_physics
     implicit none
     private
@@ -24,6 +24,8 @@ module io_input
         type(type_conditions) :: conditions
         type(type_output_settings) :: output_settings
         type(type_input_geometry) :: geometry
+        !> The optional DataAssimilation.json.
+        type(type_assimilation_settings) :: assimilation
     contains
         procedure, pass(self), public :: initialize => initialize_type_input
         ! procedure, pass(self), public :: get_density_info => get_density_info_input
@@ -105,6 +107,7 @@ contains
         self%geometry%parent => self
         call self%geometry%initialize()
         call self%output_settings%initialize()
+        call self%assimilation%initialize(self%input_path//"DataAssimilation.json")
 
     end subroutine initialize_type_input
 

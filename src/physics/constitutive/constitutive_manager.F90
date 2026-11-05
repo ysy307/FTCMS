@@ -2,6 +2,7 @@ module physics_constitutive_manager
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use :: iapws, only:type_iapws97, type_iapws06
     use :: module_core
+    use :: constitutive_constants, only:tangent_pressure, tangent_temperature
     use :: physics_constitutive_base, only:type_iapws_wrapper
     use :: constitutive_materials_manager, only:type_material_manager
     use :: constitutive_models_manager, only:type_models_manager
@@ -220,23 +221,35 @@ contains
 
     end subroutine get_density_solid
 
-    subroutine calc_density_water(self, state, density_water)
+    subroutine calc_density_water(self, state, density_water, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: density_water
+        !> \((\partial\rho_w/\partial p_w,\partial\rho_w/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         call self%iapws_wrapper%calc_rho_water(state, density_water)
+        if (present(tangent)) then
+            call self%iapws_wrapper%calc_drho_water_dP(state, tangent(tangent_pressure))
+            call self%iapws_wrapper%calc_drho_water_dT(state, tangent(tangent_temperature))
+        end if
 
     end subroutine calc_density_water
 
-    subroutine calc_density_ice(self, state, density_ice)
+    subroutine calc_density_ice(self, state, density_ice, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: density_ice
+        !> \((\partial\rho_i/\partial p_w,\partial\rho_i/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         call self%iapws_wrapper%calc_rho_ice(state, density_ice)
+        if (present(tangent)) then
+            call self%iapws_wrapper%calc_drho_ice_dP(state, tangent(tangent_pressure))
+            call self%iapws_wrapper%calc_drho_ice_dT(state, tangent(tangent_temperature))
+        end if
 
     end subroutine calc_density_ice
 
@@ -315,44 +328,65 @@ contains
 
     end subroutine get_specific_heat_solid
 
-    subroutine calc_specific_heat_water(self, state, specific_heat_water)
+    subroutine calc_specific_heat_water(self, state, specific_heat_water, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: specific_heat_water
+        !> \((\partial c_w/\partial p_w,\partial c_w/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         call self%iapws_wrapper%calc_cp_water(state, specific_heat_water)
+        if (present(tangent)) then
+            call self%iapws_wrapper%calc_dcp_water_dP(state, tangent(tangent_pressure))
+            call self%iapws_wrapper%calc_dcp_water_dT(state, tangent(tangent_temperature))
+        end if
 
     end subroutine calc_specific_heat_water
 
-    subroutine calc_specific_heat_ice(self, state, specific_heat_ice)
+    subroutine calc_specific_heat_ice(self, state, specific_heat_ice, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: specific_heat_ice
+        !> \((\partial c_i/\partial p_w,\partial c_i/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         call self%iapws_wrapper%calc_cp_ice(state, specific_heat_ice)
+        if (present(tangent)) then
+            call self%iapws_wrapper%calc_dcp_ice_dP(state, tangent(tangent_pressure))
+            call self%iapws_wrapper%calc_dcp_ice_dT(state, tangent(tangent_temperature))
+        end if
 
     end subroutine calc_specific_heat_ice
 
-    subroutine calc_specific_heat_vapor(self, state, specific_heat_vapor)
+    subroutine calc_specific_heat_vapor(self, state, specific_heat_vapor, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: specific_heat_vapor
+        !> \((0,\mathrm{d}c_v/\mathrm{d}T)\): saturated vapour depends on \(T\) alone; overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         call self%iapws_wrapper%calc_cp_vapor(state, specific_heat_vapor)
+        if (present(tangent)) then
+            tangent(tangent_pressure) = 0.0d0
+            call self%iapws_wrapper%calc_dcp_vapor_dT(state, tangent(tangent_temperature))
+        end if
 
     end subroutine calc_specific_heat_vapor
 
-    subroutine calc_thermal_conductivity_nondispersivity(self, material_id, state, thermal_conductivity)
+    subroutine calc_thermal_conductivity_nondispersivity(self, material_id, state, thermal_conductivity, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         integer(int32), intent(in) :: material_id
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: thermal_conductivity
+        !> \((\partial\lambda/\partial p_w,\partial\lambda/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
-        call self%materials(self%materials_id_map(material_id))%calc_thermal_conductivity(state, thermal_conductivity)
+        call self%materials(self%materials_id_map(material_id))%calc_thermal_conductivity(state, thermal_conductivity, &
+                                                                                          tangent)
 
     end subroutine calc_thermal_conductivity_nondispersivity
 
@@ -388,14 +422,17 @@ contains
         call self%models(self%materials_id_map(material_id))%calc_latent_heat_fusion(state, latent_heat_fusion)
     end subroutine calc_latent_heat_fusion
 
-    subroutine calc_latent_heat_vaporization(self, material_id, state, latent_heat_vaporization)
+    subroutine calc_latent_heat_vaporization(self, material_id, state, latent_heat_vaporization, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         integer(int32), intent(in) :: material_id
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: latent_heat_vaporization
+        !> \((\partial L_v/\partial p_w,\partial L_v/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
-        call self%models(self%materials_id_map(material_id))%calc_latent_heat_vaporization(state, latent_heat_vaporization)
+        call self%models(self%materials_id_map(material_id))%calc_latent_heat_vaporization(state, latent_heat_vaporization, &
+                                                                                           tangent)
     end subroutine calc_latent_heat_vaporization
 
     subroutine calc_pressure_ice_water_derivative(self, material_id, state, deriv)
@@ -461,14 +498,16 @@ contains
             state, target_total_water, new_pressure, new_ice, converged)
     end subroutine solve_local_conserved_equilibrium
 
-    subroutine calc_Kflh(self, material_id, state, Kflh)
+    subroutine calc_Kflh(self, material_id, state, Kflh, log_tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         integer(int32), intent(in) :: material_id
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: Kflh
+        !> \((\partial\ln K/\partial p_w,\partial\ln K/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        call self%models(self%materials_id_map(material_id))%calc_Kflh(state, Kflh)
+        call self%models(self%materials_id_map(material_id))%calc_Kflh(state, Kflh, log_tangent)
     end subroutine calc_Kflh
 
     subroutine calc_KlT(self, material_id, state, KlT)
@@ -523,16 +562,18 @@ contains
         call self%models(self%materials_id_map(material_id))%calc_KvT(state, KvT)
     end subroutine calc_KvT
 
-    subroutine calc_saturation_pressure(self, material_id, state, saturation_pressure, is_saturated)
+    subroutine calc_saturation_pressure(self, material_id, state, saturation_pressure, is_saturated, tangent)
         implicit none
         class(type_constitutive_manager), intent(in) :: self
         integer(int32), intent(in) :: material_id
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: saturation_pressure
         logical, intent(inout) :: is_saturated
+        !> \((\partial p_{sat}/\partial p_w,\partial p_{sat}/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         call self%models(self%materials_id_map(material_id))%calc_saturation_pressure( &
-            state, saturation_pressure, is_saturated)
+            state, saturation_pressure, is_saturated, tangent)
     end subroutine calc_saturation_pressure
 
     subroutine calc_cryo_suction_deriv_T(self, material_id, state, deriv)

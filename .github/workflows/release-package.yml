@@ -34,7 +34,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates git ninja-build python3-pip
-          python3 -m pip install --upgrade cmake fypp
+          python3 -m pip install --upgrade cmake fypp sympy
 
       - name: Restore compiled dependencies
         id: dependency-cache
@@ -105,9 +105,9 @@ jobs:
         shell: cmd
         run: scripts\ci\install-oneapi-windows.bat "%ONEAPI_URL%" "%ONEAPI_COMPONENTS%"
 
-      - name: Install fypp
+      - name: Install fypp and SymPy
         shell: cmd
-        run: python -m pip install fypp
+        run: python -m pip install fypp sympy
 
       - name: Restore compiled dependencies
         id: dependency-cache

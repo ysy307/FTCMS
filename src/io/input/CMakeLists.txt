@@ -20,6 +20,7 @@ target_sources(SOLVER_INPUT PRIVATE
     reader/basic/basic_geometry_settings.F90
     reader/basic/basic_materials.F90
     reader/basic/basic_solver_settings.F90
+    reader/basic/basic_discretization_settings.F90
 
     # --- Conditions ---
     reader/conditions/conditions_base.F90
@@ -39,6 +40,7 @@ target_sources(SOLVER_INPUT PRIVATE
     reader/geometry/geometry_interface.F90
 
     # Input manager
+    reader/assimilation/assimilation_settings.F90
     reader/input_manager.F90
 
     # ----------------------------
@@ -48,7 +50,6 @@ target_sources(SOLVER_INPUT PRIVATE
     translator/translator_basic.F90
     translator/translator_conditions.F90
     translator/translator_output.F90
-    translator/translator_geometry.F90
 
     # ----------------------------
     # Entry point

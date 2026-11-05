@@ -8,7 +8,8 @@ module models_phase_change_manager
     use :: iapws, only:type_iapws97, type_iapws06
     use :: module_core, only:type_state
     use :: constitutive_constants, only:latent_heat_fusion_water_0C, &
-        TtoK => celsius_to_kelvin, Rg => universal_gas_constant, Mw => molar_mass_water, rho_std => reference_water_density
+        TtoK => celsius_to_kelvin, Rg => universal_gas_constant, Mw => molar_mass_water, rho_std => reference_water_density, &
+        tangent_pressure, tangent_temperature
     use :: models_phase_change_gcc, only:abst_gcc
     use :: models_wrf, only:abst_wrf
     use :: models_phase_change_fusion, only:type_fusion
@@ -284,27 +285,37 @@ contains
 
     end subroutine calc_latent_heat_fusion
 
-    subroutine calc_latent_heat_vaporization(self, state, Lv)
+    subroutine calc_latent_heat_vaporization(self, state, Lv, tangent)
         implicit none
         class(type_phase_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: Lv
+        !> \((\partial L_v/\partial p_w,\partial L_v/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         real(real64) :: temperature
 
         call state%temperature%get(temperature)
-        call self%evap%calc_latent_heat_vaporization(temperature, Lv)
+        if (present(tangent)) then
+            ! The latent heat is a function of the temperature alone.
+            tangent(tangent_pressure) = 0.0d0
+            call self%evap%calc_latent_heat_vaporization(temperature, Lv, tangent(tangent_temperature))
+        else
+            call self%evap%calc_latent_heat_vaporization(temperature, Lv)
+        end if
 
     end subroutine calc_latent_heat_vaporization
 
-    subroutine calc_saturation_pressure(self, state, saturation_pressure, is_saturated)
+    subroutine calc_saturation_pressure(self, state, saturation_pressure, is_saturated, tangent)
         implicit none
         class(type_phase_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: saturation_pressure
         logical, intent(inout) :: is_saturated
+        !> \((\partial p_{sat}/\partial p_w,\partial p_{sat}/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
-        call self%fusion%calc_saturation_pressure(state, saturation_pressure, is_saturated)
+        call self%fusion%calc_saturation_pressure(state, saturation_pressure, is_saturated, tangent)
     end subroutine calc_saturation_pressure
 
     subroutine deriv_pressure_ice_water(self, state, deriv)

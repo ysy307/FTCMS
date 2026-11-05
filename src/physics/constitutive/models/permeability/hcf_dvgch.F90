@@ -1,26 +1,29 @@
 submodule(models_hcf) hcf_dvgch
+    use :: constitutive_laws, only:evaluate_kr_durner, evaluate_kr_durner_tangent
     implicit none
 contains
-    module subroutine calc_kr_base_dvgch(self, h, kr)
+    !> The Durner law with one inverse air-entry head shared by both pore systems.
+    module subroutine calc_kr_base_dvgch(self, h, kr, dkr_dh)
         implicit none
         class(type_hcf_base_dvgch), intent(in) :: self
         real(real64), intent(in) :: h
         real(real64), intent(inout) :: kr
+        real(real64), intent(inout), optional :: dkr_dh
 
-        real(real64) :: saturation_1, saturation_2
+        real(real64) :: dkr(1)
 
         associate (params => self%parent%config)
-            if (h < 0.0d0) then
-                saturation_1 = (1.0d0 + (-params%alpha1 * h)**params%n1)**(-params%m1)
-                saturation_2 = (1.0d0 + (-params%alpha1 * h)**params%n2)**(-params%m2)
-                kr = (params%w1 * saturation_1 + params%w2 * saturation_2)**params%l * &
-                     (params%w1 * params%alpha1 * &
-                      (1.0d0 - (1.0d0 - saturation_1**(1.0d0 / params%m1))**params%m1) + &
-                      params%w2 * params%alpha1 * &
-                      (1.0d0 - (1.0d0 - saturation_2**(1.0d0 / params%m2))**params%m2))**2 / &
-                     (params%w1 * params%alpha1 + params%w2 * params%alpha1)**2
-            else
+            if (.not. (h < 0.0d0)) then
+                ! A non-negative head is saturated: k_r = 1.
                 kr = 1.0d0
+                if (present(dkr_dh)) dkr_dh = 0.0d0
+            else if (present(dkr_dh)) then
+                call evaluate_kr_durner_tangent(params%alpha1, params%n1, params%m1, params%alpha1, params%n2, params%m2, &
+                                                params%w1, params%w2, params%l, h, [1.0d0], kr, dkr)
+                dkr_dh = dkr(1)
+            else
+                call evaluate_kr_durner(params%alpha1, params%n1, params%m1, params%alpha1, params%n2, params%m2, &
+                                        params%w1, params%w2, params%l, h, kr)
             end if
         end associate
     end subroutine calc_kr_base_dvgch

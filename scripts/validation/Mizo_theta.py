@@ -8,6 +8,8 @@ import h5py
 import numpy as np
 import pyvista as pv
 
+from ftcms_fields import read_fields
+
 
 EXPERIMENTAL_DATA = {
     0.01: [0.345, 0.420, 0.375, 0.410],
@@ -93,16 +95,6 @@ def _initial_condition(output_dir):
     return {"conditions_file": None}
 
 
-# Cell types by the number of corners a cell has, for the two spatial
-# dimensions the solver writes. The HDF5 records only the corner indices, so the
-# element is identified by how many of them there are.
-_CELL_TYPES = {
-    (2, 3): pv.CellType.TRIANGLE,
-    (2, 4): pv.CellType.QUAD,
-    (3, 4): pv.CellType.TETRA,
-    (3, 8): pv.CellType.HEXAHEDRON,
-}
-
 SNAPSHOT_FORMATS = ("auto", "vtu", "hdf5")
 _REQUIRED_FIELDS = ("WaterContent", "IceContent")
 
@@ -116,77 +108,48 @@ class SnapshotError(ValueError):
     """
 
 
-def _vtu_snapshots(output_dir):
-    """Output index to file, for the one-file-per-step ``Out_NNN.vtu`` layout."""
+def _snapshots(output_dir, extension):
+    """Output index to file, for the one-file-per-step ``Out_NNN.<extension>`` layout."""
     found = {}
     for directory in (output_dir, output_dir / "Files"):
         if not directory.is_dir():
             continue
-        for path in sorted(directory.glob("Out_*.vtu")):
+        for path in sorted(directory.glob(f"Out_*.{extension}")):
             try:
                 index = int(path.stem.removeprefix("Out_"))
             except ValueError:
                 continue
             if index in found:
                 raise SnapshotError(
-                    f"Ambiguous VTU output index {index}: {found[index]} and {path}"
+                    f"Ambiguous output index {index}: {found[index]} and {path}"
                 )
             found[index] = path
     return found
 
 
-def _hdf5_files(output_dir):
-    """Every HDF5 under the output directory, in the single-file layout."""
-    matches = set()
-    for directory in (output_dir, output_dir / "Files"):
-        if directory.is_dir():
-            matches |= set(directory.glob("*.h5"))
-    return sorted(matches)
-
-
-def _hdf5_snapshot_count(path):
-    with h5py.File(path, "r") as handle:
-        counts = {
-            handle[f"fields/{name}"].shape[0]
-            for name in _REQUIRED_FIELDS
-            if f"fields/{name}" in handle
-        }
-    if not counts:
-        raise SnapshotError(f"None of {', '.join(_REQUIRED_FIELDS)} found in {path}")
-    return min(counts)
-
-
 class SnapshotSource:
-    """One run's field output, whichever of the two layouts wrote it.
+    """One run's field output: one file per output step, VTU or HDF5.
 
-    The archived runs wrote one VTU per output step; the PetscDS path writes a
-    single time-indexed HDF5. Reading is the only stage that depends on which:
-    `read_grid` returns the same unstructured grid carrying the same point
-    fields either way, so the resampling, the depth bins and every metric
-    downstream are shared code and the two paths stay comparable.
+    Reading is the only stage that depends on which: `read_grid` returns the
+    same unstructured grid carrying the same fields either way, so the
+    resampling, the depth bins and every metric downstream are shared code.
     """
 
-    def __init__(self, fmt, output_dir, vtu_snapshots=None, h5_path=None, h5_count=0):
+    def __init__(self, fmt, output_dir, snapshots):
         self.format = fmt
         self.output_dir = Path(output_dir)
-        self._vtu = dict(vtu_snapshots or {})
-        self._h5_path = h5_path
-        self._h5_count = h5_count
+        self._files = dict(snapshots)
 
     # ---- Inquiry ----
     def available_indices(self):
-        if self.format == "vtu":
-            return sorted(self._vtu)
-        return list(range(self._h5_count))
+        return sorted(self._files)
 
     def snapshot_count(self):
-        return len(self._vtu) if self.format == "vtu" else self._h5_count
+        return len(self._files)
 
     # ---- Getter ----
     def snapshot_path(self, index):
-        if self.format == "vtu":
-            return self._vtu.get(index)
-        return self._h5_path
+        return self._files.get(index)
 
     def describe(self, index=None):
         """Provenance of the data a result was measured from."""
@@ -204,22 +167,15 @@ class SnapshotSource:
     # ---- Algorithm ----
     def read_grid(self, index):
         """The mesh and the total-water fields of one output index."""
-        if self.format == "vtu":
-            path = self._vtu.get(index)
-            if path is None:
-                indices = self.available_indices()
-                span = f"{indices[0]}..{indices[-1]}" if indices else "none"
-                raise SnapshotError(
-                    f"No VTU output at index {index} under {self.output_dir}; "
-                    f"{len(indices)} snapshots present ({span})"
-                )
-            return _read_vtu_grid(path)
-        if index >= self._h5_count:
+        path = self._files.get(index)
+        if path is None:
+            indices = self.available_indices()
+            span = f"{indices[0]}..{indices[-1]}" if indices else "none"
             raise SnapshotError(
-                f"{self._h5_path} holds {self._h5_count} output times, "
-                f"none at index {index}"
+                f"No {self.format} output at index {index} under {self.output_dir}; "
+                f"{len(indices)} snapshots present ({span})"
             )
-        return _read_hdf5_grid(self._h5_path, index)
+        return _read_vtu_grid(path)
 
 
 def resolve_snapshot_source(output_dir, snapshot_format="auto"):
@@ -238,33 +194,23 @@ def resolve_snapshot_source(output_dir, snapshot_format="auto"):
     if not output_dir.is_dir():
         raise SnapshotError(f"Output directory {output_dir} does not exist")
 
-    vtu = _vtu_snapshots(output_dir) if snapshot_format in ("auto", "vtu") else {}
-    h5 = _hdf5_files(output_dir) if snapshot_format in ("auto", "hdf5") else []
+    vtu = _snapshots(output_dir, "vtu") if snapshot_format in ("auto", "vtu") else {}
+    h5 = _snapshots(output_dir, "h5") if snapshot_format in ("auto", "hdf5") else {}
 
     if snapshot_format == "auto":
         if vtu and h5:
             raise SnapshotError(
-                f"{output_dir} holds both {len(vtu)} Out_*.vtu snapshots and "
-                f"{len(h5)} HDF5 file(s); pass --snapshot_format vtu or hdf5"
+                f"{output_dir} holds both {len(vtu)} Out_*.vtu and {len(h5)} Out_*.h5 "
+                "snapshots; pass --snapshot_format vtu or hdf5"
             )
         if not vtu and not h5:
-            raise SnapshotError(
-                f"No Out_*.vtu and no *.h5 field output under {output_dir}"
-            )
+            raise SnapshotError(f"No Out_*.vtu and no Out_*.h5 field output under {output_dir}")
         snapshot_format = "vtu" if vtu else "hdf5"
 
-    if snapshot_format == "vtu":
-        if not vtu:
-            raise SnapshotError(f"No Out_*.vtu field output under {output_dir}")
-        return SnapshotSource("vtu", output_dir, vtu_snapshots=vtu)
-
-    if len(h5) != 1:
-        raise SnapshotError(
-            f"Expected exactly one HDF5 output under {output_dir}, found {len(h5)}"
-        )
-    return SnapshotSource(
-        "hdf5", output_dir, h5_path=h5[0], h5_count=_hdf5_snapshot_count(h5[0])
-    )
+    found = vtu if snapshot_format == "vtu" else h5
+    if not found:
+        raise SnapshotError(f"No {snapshot_format} field output under {output_dir}")
+    return SnapshotSource(snapshot_format, output_dir, found)
 
 
 def _timestep_index(time_hours, output_interval_minutes):
@@ -272,55 +218,11 @@ def _timestep_index(time_hours, output_interval_minutes):
 
 
 def _read_vtu_grid(path):
-    """One archived output step, as an unstructured grid."""
-    grid = pv.read(path)
+    """One output step, as an unstructured grid in the project's frame."""
+    grid = read_fields(path)
     for name in _REQUIRED_FIELDS:
         if name not in grid.point_data and name not in grid.cell_data:
             raise SnapshotError(f"{name} not found in {path}")
-    return grid
-
-
-def _read_hdf5_grid(path, index):
-    """One output time of the single time-indexed HDF5, as an unstructured grid.
-
-    The file holds the vertices, the corner indices of every cell, and one
-    dataset per quantity indexed by output time; the grid is assembled here so
-    that it is interchangeable with an archived VTU step downstream.
-    """
-    with h5py.File(path, "r") as handle:
-        points = np.asarray(handle["geometry/vertices"])
-        cells = np.asarray(handle["viz/topology/cells"])
-        fields = {}
-        for name in _REQUIRED_FIELDS:
-            if f"fields/{name}" not in handle:
-                raise SnapshotError(f"{name} not found in {path}")
-            data = handle[f"fields/{name}"]
-            if index >= data.shape[0]:
-                raise SnapshotError(
-                    f"{path} holds {data.shape[0]} output times, none at index {index}"
-                )
-            fields[name] = np.asarray(data[index]).reshape(data.shape[1], -1)[:, 0]
-
-    if points.shape[1] == 2:
-        points = np.column_stack([points, np.zeros(len(points))])
-    # A mesh embedded in three coordinates is still two-dimensional when one of
-    # them never varies: an x-z column is meshed that way so that gravity acts
-    # along a coordinate the solve carries.
-    varying = int(sum(np.ptp(points[:, axis]) > 0.0 for axis in range(3)))
-    corners = cells.shape[1]
-    cell_type = _CELL_TYPES.get((varying, corners))
-    if cell_type is None:
-        raise SnapshotError(
-            f"No cell type for {corners} corners in {varying} dimensions in {path}"
-        )
-
-    counts = np.full((len(cells), 1), corners, dtype=np.int64)
-    connectivity = np.hstack([counts, cells.astype(np.int64)]).ravel()
-    grid = pv.UnstructuredGrid(
-        connectivity, np.full(len(cells), cell_type, dtype=np.uint8), points
-    )
-    for name, values in fields.items():
-        grid.point_data[name] = values
     return grid
 
 

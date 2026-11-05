@@ -124,9 +124,9 @@ PetscErrorCode ftcms_petscfe_quadrature(DM dm, PetscInt field, PetscInt max_poin
  * The closure carries PETSc's orientation flips, so a facet degree of freedom
  * shared by two cells is read with each cell's own sign.
  */
-PetscErrorCode ftcms_petscfe_evaluate_cell(DM dm, Vec local_x, PetscInt field, PetscInt cell,
-                                           PetscInt num_points, const PetscReal ref_points[],
-                                           PetscScalar values[], PetscScalar divergence[])
+static PetscErrorCode evaluate_cell(DM dm, Vec local_x, PetscInt field, PetscInt cell, PetscInt num_points,
+                                    const PetscReal ref_points[], PetscScalar values[], PetscScalar divergence[],
+                                    PetscScalar gradients[])
 {
   PetscDS         ds;
   PetscFE         fe;
@@ -197,6 +197,10 @@ PetscErrorCode ftcms_petscfe_evaluate_cell(DM dm, Vec local_x, PetscInt field, P
     PetscCall(PetscFEPushforwardGradient(fe, &fegeom, 1, u_x));
 
     for (c = 0; c < Nc; ++c) values[p * Nc + c] = u[c];
+    if (gradients) {
+      for (c = 0; c < Nc; ++c)
+        for (d = 0; d < cdim; ++d) gradients[(p * Nc + c) * cdim + d] = u_x[c * cdim + d];
+    }
     if (divergence) {
       PetscScalar div = 0.0;
 
@@ -207,6 +211,28 @@ PetscErrorCode ftcms_petscfe_evaluate_cell(DM dm, Vec local_x, PetscInt field, P
 
   PetscCall(PetscTabulationDestroy(&tab));
   PetscCall(DMPlexVecRestoreClosure(dm, section, local_x, cell, &csize, &closure));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+PetscErrorCode ftcms_petscfe_evaluate_cell(DM dm, Vec local_x, PetscInt field, PetscInt cell,
+                                           PetscInt num_points, const PetscReal ref_points[],
+                                           PetscScalar values[], PetscScalar divergence[])
+{
+  PetscFunctionBegin;
+  PetscCall(evaluate_cell(dm, local_x, field, cell, num_points, ref_points, values, divergence, NULL));
+  PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+/*
+ * The same evaluation with the physical gradient of every component:
+ *   gradients : num_points * Nc * dim, point-major, then component, then direction
+ */
+PetscErrorCode ftcms_petscfe_evaluate_cell_gradient(DM dm, Vec local_x, PetscInt field, PetscInt cell,
+                                                    PetscInt num_points, const PetscReal ref_points[],
+                                                    PetscScalar values[], PetscScalar gradients[])
+{
+  PetscFunctionBegin;
+  PetscCall(evaluate_cell(dm, local_x, field, cell, num_points, ref_points, values, NULL, gradients));
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 

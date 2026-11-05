@@ -16,18 +16,22 @@ contains
         class(type_conditions), intent(inout) :: self
         type(json_file), intent(inout) :: json
         integer(int32) :: i
+        logical :: required, found
         character(256) :: buffer(3) = [character(256) :: initial_conditions, "", ""]
 
         select type (p => self%parent)
         type is (type_input)
+            ! An equation that is not solved may still state its initial
+            ! condition: that is the value its potential is held at.
             do i = 1, IC_TARGETS%NUM_ID
 
+                required = .true.
                 select case (i)
                 case (IC_TARGETS%THERMAL%ID)
-                    if (.not. p%basic%analysis_controls%is_active(i)) cycle
+                    required = p%basic%analysis_controls%is_active(i)
                     buffer(2) = thermal
                 case (IC_TARGETS%HYDRAULIC%ID)
-                    if (.not. p%basic%analysis_controls%is_active(i)) cycle
+                    required = p%basic%analysis_controls%is_active(i)
                     buffer(2) = hydraulic
                 case (IC_TARGETS%MECHANICAL%ID)
                     if (.not. p%basic%analysis_controls%is_active(i)) cycle
@@ -37,9 +41,9 @@ contains
                 end select
                 buffer(3) = type
 
-                call get_json_value(json, join(buffer), self%initial_conditions%physics(i)%type, &
-                                    is_required=.true., valid_list=valid_initial_condition_types)
-                ! self%initial_conditions%physics(i)%type = IC_METHODS%to_id(tmp_string)
+                call get_json_value(json, join(buffer), self%initial_conditions%physics(i)%type, found=found, &
+                                    is_required=required, valid_list=valid_initial_condition_types)
+                if (.not. found) cycle
 
                 select case (self%initial_conditions%physics(i)%type)
                 case (IC_METHODS%UNIFORM%NAME)

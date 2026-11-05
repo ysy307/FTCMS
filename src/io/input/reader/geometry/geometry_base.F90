@@ -34,11 +34,10 @@ contains
                 error stop "Unsupported initial condition source"
             end if
 
-            call self%mesh%load(strip(fullpath))
+            call self%mesh%load(strip(fullpath), p%basic%simulation_settings%calculate_type)
 
             call global_logger%log_message("Mesh read: nodes="//to_string(self%mesh%num_nodes) &
-                                           //", cells="//to_string(self%mesh%num_cells) &
-                                           //", colours="//to_string(self%mesh%num_colors))
+                                           //", cells="//to_string(self%mesh%num_cells))
 
             ! Always deallocate here
             if (allocated(fields_to_read)) deallocate (fields_to_read)

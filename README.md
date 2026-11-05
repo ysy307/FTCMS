@@ -80,13 +80,13 @@ Run the provided scripts to install the required external libraries:
 chmod +x scripts/install/install_stdlib.sh
 chmod +x scripts/install/install_jsonfortran.sh
 chmod +x scripts/install/install_iapws.sh
-chmod +x scripts/install/install_vtk_cxx.sh
+chmod +x scripts/install/install_petsc.sh
 
 # Execute the scripts
 ./scripts/install/install_stdlib.sh
 ./scripts/install/install_jsonfortran.sh
 ./scripts/install/install_iapws.sh
-./scripts/install/install_vtk_cxx.sh
+./scripts/install/install_petsc.sh
 ```
 
 ---
@@ -96,7 +96,7 @@ chmod +x scripts/install/install_vtk_cxx.sh
 #### 4.1. Generate Build Files with CMake
 
 ```bash
-cmake -S . -B CMakeBuild -DBUILD_APP=test -DCMAKE_BUILD_TYPE=Release -G "Ninja"
+cmake -S . -B CMakeBuild -DCMAKE_BUILD_TYPE=Release -G "Ninja"
 ```
 
 #### 4.2. Build the Project
@@ -109,10 +109,10 @@ cmake --build CMakeBuild --parallel
 
 ### 5. Run the Application ▶️
 
-Run the compiled test application:
+Run a project (the directory holding `Input/Basic.json`, `Input/Conditions.json` and `Input/Output.json`):
 
 ```bash
-./bin/test
+FTCMS_PROJECT_PATH=<project-directory> mpirun -n 1 ./bin/FTCMS
 ```
 
 ### Software environment
@@ -122,7 +122,7 @@ Run the compiled test application:
 * CMake version 4.0.3
 * Fortran Standard Library 0.7.0
 * JSON-Fortran 9.0.3
-* VTK - The Visualization Toolkit 9.5.0
+* PETSc 3.25
 * [IAPWS 0.0.1](https://github.com/ysy307/IAPWS.git)
 
 ## Usage

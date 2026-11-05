@@ -2,7 +2,7 @@ module models_hcf
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use :: iapws, only:type_iapws97, type_iapws06
     use :: module_core
-    use :: numerical_special_functions_mkl, only: type_mkl_regularized_incomplete_beta
+    use :: numerical_special_functions, only: type_regularized_incomplete_beta
     use :: constitutive_constants, only:TtoK => celsius_to_kelvin, Mw => molar_mass_water, &
         Rg => universal_gas_constant, g => gravity_acceleration, rho_std => reference_water_density
     use :: physics_constitutive_base, only:abst_constitutive
@@ -108,6 +108,9 @@ module models_hcf
         procedure, pass(self), public :: calc_KvT => calc_KvT_hcf
         procedure, pass(self), public :: calc_head => calc_head_hcf
         procedure, pass(self), private :: calc_impedance_ratio => calc_impedance_ratio_hcf
+        procedure, pass(self), private :: apply_base_factor => apply_base_factor_hcf
+        procedure, pass(self), private :: apply_impedance_factor => apply_impedance_factor_hcf
+        procedure, pass(self), private :: apply_viscosity_factor => apply_viscosity_factor_hcf
         procedure, pass(self), public :: is_initialized => is_initialized_hcf
     end type abst_hcf
 
@@ -145,20 +148,56 @@ module models_hcf
 
         end subroutine calc_KvT_hcf
 
-        module subroutine calc_head_hcf(self, state, head)
+        module subroutine calc_head_hcf(self, state, head, tangent)
             implicit none
             class(abst_hcf), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: head
-
+            !> \((\partial h/\partial p_w,\partial h/\partial T)\), m/Pa and m/K; overwritten on exit when present
+            real(real64), intent(inout), optional :: tangent(2)
         end subroutine calc_head_hcf
 
-        module subroutine calc_impedance_ratio_hcf(self, state, ratio)
+        module subroutine calc_impedance_ratio_hcf(self, state, ratio, tangent)
             implicit none
             class(abst_hcf), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: ratio
+            !> \((\partial Q/\partial p_w,\partial Q/\partial T)\); overwritten on exit when present
+            real(real64), intent(inout), optional :: tangent(2)
         end subroutine calc_impedance_ratio_hcf
+
+        !> Multiply \(K\) by the retention factor \(k_r(h)\) and add \(\mathrm{d}\ln k_r\) to `log_tangent`.
+        module subroutine apply_base_factor_hcf(self, state, kflh, log_tangent)
+            implicit none
+            class(abst_hcf), intent(in) :: self
+            type(type_state), intent(in) :: state
+            !> Conductivity so far, m/s; multiplied on exit
+            real(real64), intent(inout) :: kflh
+            !> \((\partial\ln K/\partial p_w,\partial\ln K/\partial T)\) so far; incremented on exit when present
+            real(real64), intent(inout), optional :: log_tangent(2)
+        end subroutine apply_base_factor_hcf
+
+        !> Multiply \(K\) by the ice impedance \(10^{-\Omega Q}\) and add its log-tangent.
+        module subroutine apply_impedance_factor_hcf(self, state, kflh, log_tangent)
+            implicit none
+            class(abst_hcf), intent(in) :: self
+            type(type_state), intent(in) :: state
+            !> Conductivity so far, m/s; multiplied on exit
+            real(real64), intent(inout) :: kflh
+            !> \((\partial\ln K/\partial p_w,\partial\ln K/\partial T)\) so far; incremented on exit when present
+            real(real64), intent(inout), optional :: log_tangent(2)
+        end subroutine apply_impedance_factor_hcf
+
+        !> Multiply \(K\) by the viscosity ratio \(\mu_0/\mu(T)\) and add its log-tangent.
+        module subroutine apply_viscosity_factor_hcf(self, state, kflh, log_tangent)
+            implicit none
+            class(abst_hcf), intent(in) :: self
+            type(type_state), intent(in) :: state
+            !> Conductivity so far, m/s; multiplied on exit
+            real(real64), intent(inout) :: kflh
+            !> \((\partial\ln K/\partial p_w,\partial\ln K/\partial T)\) so far; incremented on exit when present
+            real(real64), intent(inout), optional :: log_tangent(2)
+        end subroutine apply_viscosity_factor_hcf
 
         module pure function is_initialized_hcf(self) result(initialized)
             implicit none
@@ -169,13 +208,16 @@ module models_hcf
     end interface
 
     abstract interface
-        subroutine abst_calc_Kflh(self, state, Kflh)
+        !> Liquid hydraulic conductivity \(K\) of a state, m/s, and optionally
+        !> \(\mathrm{d}\ln K\) in \((p_w,T)\) through the factors the mode applies.
+        subroutine abst_calc_Kflh(self, state, Kflh, log_tangent)
             import :: abst_hcf, type_state, real64
             implicit none
             class(abst_hcf), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            !> \((\partial\ln K/\partial p_w,\partial\ln K/\partial T)\); overwritten on exit when present
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine abst_calc_Kflh
     end interface
 
@@ -215,60 +257,60 @@ module models_hcf
     end type type_hcf_base_impedance_viscosity
 
     interface
-        module subroutine calc_Kflh_base(self, state, Kflh)
+        module subroutine calc_Kflh_base(self, state, Kflh, log_tangent)
             implicit none
             class(type_hcf_base), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine calc_Kflh_base
 
-        module subroutine calc_Kflh_impedance(self, state, Kflh)
+        module subroutine calc_Kflh_impedance(self, state, Kflh, log_tangent)
             implicit none
             class(type_hcf_impedance), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine calc_Kflh_impedance
 
-        module subroutine calc_Kflh_viscosity(self, state, Kflh)
+        module subroutine calc_Kflh_viscosity(self, state, Kflh, log_tangent)
             implicit none
             class(type_hcf_viscosity), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine calc_Kflh_viscosity
 
-        module subroutine calc_Kflh_base_impedance(self, state, Kflh)
+        module subroutine calc_Kflh_base_impedance(self, state, Kflh, log_tangent)
             implicit none
             class(type_hcf_base_impedance), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine calc_Kflh_base_impedance
 
-        module subroutine calc_Kflh_base_viscosity(self, state, Kflh)
+        module subroutine calc_Kflh_base_viscosity(self, state, Kflh, log_tangent)
             implicit none
             class(type_hcf_base_viscosity), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine calc_Kflh_base_viscosity
 
-        module subroutine calc_Kflh_impedance_viscosity(self, state, Kflh)
+        module subroutine calc_Kflh_impedance_viscosity(self, state, Kflh, log_tangent)
             implicit none
             class(type_hcf_impedance_viscosity), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine calc_Kflh_impedance_viscosity
 
-        module subroutine calc_Kflh_base_impedance_viscosity(self, state, Kflh)
+        module subroutine calc_Kflh_base_impedance_viscosity(self, state, Kflh, log_tangent)
             implicit none
             class(type_hcf_base_impedance_viscosity), intent(in) :: self
             type(type_state), intent(in) :: state
             real(real64), intent(inout) :: Kflh
-
+            real(real64), intent(inout), optional :: log_tangent(2)
         end subroutine calc_Kflh_base_impedance_viscosity
 
     end interface
@@ -282,13 +324,17 @@ module models_hcf
     end type abst_hcf_base
 
     abstract interface
-        subroutine abst_calc_base_kr(self, h, kr)
+        !> Relative permeability \(k_r(h)\) of the retention model, and optionally \(\mathrm{d}k_r/\mathrm{d}h\).
+        subroutine abst_calc_base_kr(self, h, kr, dkr_dh)
             import :: abst_hcf_base, real64
             implicit none
             class(abst_hcf_base), intent(in) :: self
+            !> Pressure head \(h\), m
             real(real64), intent(in) :: h
+            !> \(k_r\); overwritten on exit
             real(real64), intent(inout) :: kr
-
+            !> \(\mathrm{d}k_r/\mathrm{d}h\), 1/m; overwritten on exit when present
+            real(real64), intent(inout), optional :: dkr_dh
         end subroutine abst_calc_base_kr
     end interface
 
@@ -299,7 +345,7 @@ module models_hcf
 
     type, extends(abst_hcf_base) :: type_hcf_base_vg
         private
-        type(type_mkl_regularized_incomplete_beta) :: incomplete_beta
+        type(type_regularized_incomplete_beta) :: incomplete_beta
     contains
         procedure :: initialize => initialize_hcf_base_vg
         procedure :: calc_kr => calc_kr_base_vg
@@ -336,52 +382,52 @@ module models_hcf
             class(type_hcf_base_vg), intent(inout) :: self
         end subroutine initialize_hcf_base_vg
 
-        module subroutine calc_kr_base_bc(self, h, kr)
+        module subroutine calc_kr_base_bc(self, h, kr, dkr_dh)
             implicit none
             class(type_hcf_base_bc), intent(in) :: self
             real(real64), intent(in) :: h
             real(real64), intent(inout) :: kr
-
+            real(real64), intent(inout), optional :: dkr_dh
         end subroutine calc_kr_base_bc
 
-        module subroutine calc_kr_base_vg(self, h, kr)
+        module subroutine calc_kr_base_vg(self, h, kr, dkr_dh)
             implicit none
             class(type_hcf_base_vg), intent(in) :: self
             real(real64), intent(in) :: h
             real(real64), intent(inout) :: kr
-
+            real(real64), intent(inout), optional :: dkr_dh
         end subroutine calc_kr_base_vg
 
-        module subroutine calc_kr_base_ko(self, h, kr)
+        module subroutine calc_kr_base_ko(self, h, kr, dkr_dh)
             implicit none
             class(type_hcf_base_ko), intent(in) :: self
             real(real64), intent(in) :: h
             real(real64), intent(inout) :: kr
-
+            real(real64), intent(inout), optional :: dkr_dh
         end subroutine calc_kr_base_ko
 
-        module subroutine calc_kr_base_mvg(self, h, kr)
+        module subroutine calc_kr_base_mvg(self, h, kr, dkr_dh)
             implicit none
             class(type_hcf_base_mvg), intent(in) :: self
             real(real64), intent(in) :: h
             real(real64), intent(inout) :: kr
-
+            real(real64), intent(inout), optional :: dkr_dh
         end subroutine calc_kr_base_mvg
 
-        module subroutine calc_kr_base_durner(self, h, kr)
+        module subroutine calc_kr_base_durner(self, h, kr, dkr_dh)
             implicit none
             class(type_hcf_base_durner), intent(in) :: self
             real(real64), intent(in) :: h
             real(real64), intent(inout) :: kr
-
+            real(real64), intent(inout), optional :: dkr_dh
         end subroutine calc_kr_base_durner
 
-        module subroutine calc_kr_base_dvgch(self, h, kr)
+        module subroutine calc_kr_base_dvgch(self, h, kr, dkr_dh)
             implicit none
             class(type_hcf_base_dvgch), intent(in) :: self
             real(real64), intent(in) :: h
             real(real64), intent(inout) :: kr
-
+            real(real64), intent(inout), optional :: dkr_dh
         end subroutine calc_kr_base_dvgch
     end interface
 
@@ -398,23 +444,27 @@ module models_hcf
     end type type_hcf_impedance_exp
 
     abstract interface
-        subroutine abst_calc_impedance_kr(self, Qice, kr)
+        !> Impedance factor at an ice ratio \(Q\), and optionally its derivative in \(Q\).
+        subroutine abst_calc_impedance_kr(self, Qice, kr, dkr_dQ)
             import :: abst_hcf_impedance, real64
             implicit none
             class(abst_hcf_impedance), intent(in) :: self
+            !> Ice ratio \(Q\)
             real(real64), intent(in) :: Qice
+            !> Impedance factor; overwritten on exit
             real(real64), intent(inout) :: kr
-
+            !> Its derivative in \(Q\); overwritten on exit when present
+            real(real64), intent(inout), optional :: dkr_dQ
         end subroutine abst_calc_impedance_kr
     end interface
 
     interface
-        module subroutine calc_impedance_exp(self, Qice, kr)
+        module subroutine calc_impedance_exp(self, Qice, kr, dkr_dQ)
             implicit none
             class(type_hcf_impedance_exp), intent(in) :: self
             real(real64), intent(in) :: Qice
             real(real64), intent(inout) :: kr
-
+            real(real64), intent(inout), optional :: dkr_dQ
         end subroutine calc_impedance_exp
     end interface
 
@@ -438,23 +488,28 @@ module models_hcf
     end interface
 
     abstract interface
-        subroutine abst_calc_mu(self, temperature, mu)
+        !> Dynamic viscosity \(\mu(T)\), Pa s, and optionally \(\mathrm{d}\mu/\mathrm{d}T\).
+        subroutine abst_calc_mu(self, temperature, mu, dmu_dT)
             import :: abst_hcf_viscosity, real64
             implicit none
             class(abst_hcf_viscosity), intent(in) :: self
+            !> Temperature, C
             real(real64), intent(in) :: temperature
+            !> \(\mu\); overwritten on exit
             real(real64), intent(inout) :: mu
-
+            !> \(\mathrm{d}\mu/\mathrm{d}T\), Pa s/K; overwritten on exit when present
+            real(real64), intent(inout), optional :: dmu_dT
         end subroutine abst_calc_mu
     end interface
 
     interface
-        module subroutine calc_kr_abst_hcf_viscosity(self, temperature, kr)
+        module subroutine calc_kr_abst_hcf_viscosity(self, temperature, kr, dkr_dT)
             implicit none
             class(abst_hcf_viscosity), intent(in) :: self
             real(real64), intent(in) :: temperature
             real(real64), intent(inout) :: kr
-
+            !> \(\mathrm{d}(\mu_0/\mu)/\mathrm{d}T\), 1/K; overwritten on exit when present
+            real(real64), intent(inout), optional :: dkr_dT
         end subroutine calc_kr_abst_hcf_viscosity
     end interface
 
@@ -470,20 +525,20 @@ module models_hcf
 
     interface
 
-        module subroutine calc_mu_exponential(self, temperature, mu)
+        module subroutine calc_mu_exponential(self, temperature, mu, dmu_dT)
             implicit none
             class(type_hcf_viscosity_exp), intent(in) :: self
             real(real64), intent(in) :: temperature
             real(real64), intent(inout) :: mu
-
+            real(real64), intent(inout), optional :: dmu_dT
         end subroutine calc_mu_exponential
 
-        module subroutine calc_mu_exponential_supercooled(self, temperature, mu)
+        module subroutine calc_mu_exponential_supercooled(self, temperature, mu, dmu_dT)
             implicit none
             class(type_hcf_viscosity_supercool), intent(in) :: self
             real(real64), intent(in) :: temperature
             real(real64), intent(inout) :: mu
-
+            real(real64), intent(inout), optional :: dmu_dT
         end subroutine calc_mu_exponential_supercooled
 
         module subroutine calc_viscosity_exp(self, temperature, kr)

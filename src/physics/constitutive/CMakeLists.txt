@@ -4,6 +4,12 @@
 add_library(SOLVER_CONSTITUTIVE STATIC)
 
 # ------------------------------------------------------------
+# Closed-form laws: SymPy states them, fypp expands them
+# ------------------------------------------------------------
+fypp_require_python_module(sympy)
+fypp_F90("-m;sympy.printing.fortran;-m;textwrap" "laws/constitutive_laws.fypp" CONSTITUTIVE_LAWS_GENERATED)
+
+# ------------------------------------------------------------
 # Sources
 # ------------------------------------------------------------
 target_sources(SOLVER_CONSTITUTIVE PRIVATE
@@ -11,6 +17,7 @@ target_sources(SOLVER_CONSTITUTIVE PRIVATE
     # 1. Base
     # ====================================================
     constitutive_constants.F90
+    ${CONSTITUTIVE_LAWS_GENERATED}
     constitutive_base.F90
 
     # ====================================================

@@ -65,7 +65,11 @@ contains
                     end do
 
                 case (THERMAL_BC_TYPES%ROBIN%ID, THERMAL_BC_TYPES%CONVECTIVE%ID, THERMAL_BC_TYPES%RADIATION%ID)
+                    ! Two values, or five for a Robin coefficient that switches with the surface value.
                     configs(num_active)%num_variables = 2
+                    if (allocated(physics_data%values(1)%values)) then
+                        if (size(physics_data%values(1)%values) >= 5) configs(num_active)%num_variables = 5
+                    end if
                     call allocate_array(configs(num_active)%time_points, &
                                         configs(num_active)%num_time_points)
                     call allocate_array(configs(num_active)%values, &
@@ -82,8 +86,11 @@ contains
                             error stop 'Boundary condition requires at least two values.'
                         end if
 
-                        configs(num_active)%values(1, i) = physics_data%values(i)%values(1)
-                        configs(num_active)%values(2, i) = physics_data%values(i)%values(2)
+                        if (size(physics_data%values(i)%values) < configs(num_active)%num_variables) then
+                            error stop 'Every time of a switching Robin condition needs all five values.'
+                        end if
+                        configs(num_active)%values(:, i) = &
+                            physics_data%values(i)%values(1:configs(num_active)%num_variables)
                     end do
 
                 case (HYDRAULIC_BC_TYPES%SEEPAGE%ID)
@@ -160,19 +167,6 @@ contains
         end associate
 
     end subroutine execute_condition_initial
-
-    module subroutine execute_condition_acceleration(self, input, config)
-        implicit none
-        class(type_input_translator), intent(in) :: self
-        class(type_input), intent(in) :: input
-        type(type_config_acceleration), intent(inout) :: config
-
-        config%num_dofs = input%geometry%mesh%num_nodes
-        config%method = ACCELERATION_METHODS%NONE
-        config%min_relaxation = 0.1d0
-        config%max_relaxation = 1.0d0
-
-    end subroutine execute_condition_acceleration
 
     module subroutine execute_condition_time(self, input, config)
         implicit none

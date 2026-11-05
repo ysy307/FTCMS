@@ -6,10 +6,7 @@ cmake_minimum_required(VERSION 3.20)
 project(FTCMS LANGUAGES Fortran C CXX)
 
 option(BUILD_TESTING "Build the testing tree" OFF)
-option(ENABLE_OPENMP "Enable OpenMP support" ON)
-option(ENABLE_MKL "Enable MKL support" ON)
 option(ENABLE_MPI "Enable MPI support" ON)
-option(ENABLE_PETSC "Enable the PETSc KSP linear solver back-end" ON)
 option(FTCMS_PORTABLE_BUILD "Avoid host-specific CPU instructions" OFF)
 option(FTCMS_BUNDLE_RUNTIME "Bundle non-system runtime libraries when installing" OFF)
 
@@ -31,13 +28,10 @@ include(fypp OPTIONAL)
 # 個別に依存関係を定義することで，CMakeが自動的にビルド順序を解決する．
 add_subdirectory(src/core)
 add_subdirectory(src/numerical)
-add_subdirectory(src/control)
 add_subdirectory(src/domain)
 add_subdirectory(src/io)
 add_subdirectory(src/physics)
 add_subdirectory(src/app/ftcms)
-add_subdirectory(src/app/plexfem)
-add_subdirectory(src/app/mixed_hydraulic)
 # ====================================================================
 # 4. Executable
 # ====================================================================
@@ -46,14 +40,8 @@ add_executable(FTCMS app/ftcms.f90)
 set_target_properties(FTCMS PROPERTIES LINKER_LANGUAGE Fortran)
 
 # 実行ファイルに必要な最上位ライブラリターゲットをリンクする（名称は仮）
-# 必要なフラグ（インクルードパスやOpenMP等）もターゲット経由で自動伝搬する
+# 必要なフラグ（インクルードパスや MPI 等）もターゲット経由で自動伝搬する
 target_link_libraries(FTCMS PRIVATE SOLVER::FTCMS)
-
-# The PetscDS/TS path is a separate executable so that the existing one is not
-# rebuilt against it: the two share the input layer and the mesh, nothing else.
-add_executable(FTCMS_PLEXFEM app/ftcms_plexfem.f90)
-set_target_properties(FTCMS_PLEXFEM PROPERTIES LINKER_LANGUAGE Fortran)
-target_link_libraries(FTCMS_PLEXFEM PRIVATE SOLVER::PLEXFEM)
 
 include(GNUInstallDirs)
 
@@ -115,7 +103,7 @@ if(ENABLE_MPI AND MPI_Fortran_FOUND)
     )
 else()
     add_custom_target(run
-        COMMAND ${CMAKE_COMMAND} -E env OMP_NUM_THREADS=4 $<TARGET_FILE:FTCMS>
+        COMMAND $<TARGET_FILE:FTCMS>
         DEPENDS FTCMS
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     )

@@ -4,7 +4,7 @@
 module physics_constitutive_base
     use, intrinsic :: iso_fortran_env
     use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
-    use :: iapws, only:type_iapws97, type_iapws06
+    use :: iapws, only:type_iapws97, type_iapws06, type_iapws_property
     use :: module_core, only:type_state
     use :: constitutive_constants, only:TtoK => celsius_to_kelvin, &
         P_atm => standard_atmospheric_pressure, &
@@ -41,6 +41,8 @@ module physics_constitutive_base
         procedure, pass(self), public :: calc_drho_water_dP => calc_drho_water_dP_abst_constitutive
         !> Calculate specific heat capacity of water
         procedure, pass(self), public :: calc_cp_water => calc_cp_water_abst_constitutive
+        procedure, pass(self), public :: calc_dcp_water_dT => calc_dcp_water_dT_abst_constitutive
+        procedure, pass(self), public :: calc_dcp_water_dP => calc_dcp_water_dP_abst_constitutive
         !> Calculate ice density
         procedure, pass(self), public :: calc_rho_ice => calc_rho_ice_abst_constitutive
         !> Calculate temperature derivative of ice density
@@ -49,6 +51,8 @@ module physics_constitutive_base
         procedure, pass(self), public :: calc_drho_ice_dP => calc_drho_ice_dP_abst_constitutive
         !> Calculate specific heat capacity of ice
         procedure, pass(self), public :: calc_cp_ice => calc_cp_ice_abst_constitutive
+        procedure, pass(self), public :: calc_dcp_ice_dT => calc_dcp_ice_dT_abst_constitutive
+        procedure, pass(self), public :: calc_dcp_ice_dP => calc_dcp_ice_dP_abst_constitutive
         !> Calculate vapor density based on relative humidity
         procedure, pass(self), public :: calc_rho_vapor => calc_rho_vapor_abst_constitutive
         !> Calculate temperature derivative of vapor density
@@ -63,6 +67,9 @@ module physics_constitutive_base
         procedure, pass(self), public :: calc_drho_vapor_saturation_dP => calc_drho_vapor_saturation_dP_abst_constitutive
         !> Calculate specific heat capacity of vapor
         procedure, pass(self), public :: calc_cp_vapor => calc_cp_vapor_abst_constitutive
+        procedure, pass(self), public :: calc_dcp_vapor_dT => calc_dcp_vapor_dT_abst_constitutive
+        procedure, pass(self), public :: calc_latent_heat_saturation => calc_latent_heat_saturation_abst_constitutive
+        procedure, pass(self), public :: calc_dlatent_heat_saturation_dT => calc_dlatent_heat_saturation_dT_abst_constitutive
 
         ! ---- Inquiry ----
         !> Check if the model is initialized
@@ -73,6 +80,7 @@ module physics_constitutive_base
         procedure, pass(self), private :: get_thermo_state_TP
         !> Retrieve absolute temperature from state
         procedure, pass(self), private :: get_thermo_state_T
+        procedure, pass(self), private :: is_pressure_held
 
     end type abst_constitutive
 
@@ -84,7 +92,129 @@ module physics_constitutive_base
         procedure, public :: initialize => initialize_iapws_wrapper
     end type type_iapws_wrapper
 
+    !> One IAPWS evaluation, remembered with the absolute state it was made at.
+    !>
+    !> A closure evaluation asks for several properties of one phase at one
+    !> state, and IAPWS forms each from the same Gibbs function; the memo
+    !> answers the repeats from the first evaluation. The key is exact
+    !> equality, so a remembered answer is the one IAPWS gives for that key.
+    type :: type_iapws_memo
+        !> Absolute temperature of the evaluation, K.
+        real(real64) :: T_K = 0.0d0
+        !> Absolute pressure of the evaluation, Pa; zero on the saturation line.
+        real(real64) :: P_abs = 0.0d0
+        !> Whether the memo holds an evaluation.
+        logical :: filled = .false.
+        !> A remembered scalar.
+        real(real64) :: value = 0.0d0
+        !> The Gibbs properties of a phase, for the water and ice memos.
+        type(type_iapws_property) :: property
+    end type type_iapws_memo
+
+    !> The IAPWS-97 saturation quantities at one temperature, from one saturation evaluation.
+    !>
+    !> Every quantity comes from the same call, so the values are consistent
+    !> whichever of them a model asks for first.
+    type :: type_saturation_memo
+        !> Absolute temperature of the evaluation, K.
+        real(real64) :: T_K = 0.0d0
+        !> Whether the memo holds an evaluation.
+        logical :: filled = .false.
+        !> \(\rho''\), kg/m3.
+        real(real64) :: rho = 0.0d0
+        !> \((\partial\rho''/\partial T)_p\), kg/(m3 K).
+        real(real64) :: drho_dT = 0.0d0
+        !> \((\partial\rho''/\partial p)_T\), kg/(m3 Pa).
+        real(real64) :: drho_dP = 0.0d0
+        !> \(\mathrm{d}\rho''/\mathrm{d}T\) along the saturation line, kg/(m3 K).
+        real(real64) :: density_dT = 0.0d0
+        !> \(c_p''\), J/(kg K).
+        real(real64) :: cp = 0.0d0
+        !> \(\mathrm{d}c_p''/\mathrm{d}T\) along the saturation line, J/(kg K2).
+        real(real64) :: dcp_dT = 0.0d0
+        !> \(L_v = h'' - h'\), J/kg.
+        real(real64) :: latent_heat = 0.0d0
+        !> \(\mathrm{d}L_v/\mathrm{d}T\) along the saturation line, J/(kg K).
+        real(real64) :: dlatent_heat_dT = 0.0d0
+    end type type_saturation_memo
+
+    ! The last evaluation of each IAPWS quantity. The formulations are fixed,
+    ! so the answer depends on the key alone, whichever model asked.
+    type(type_iapws_memo) :: water_memo, ice_memo
+    type(type_iapws_memo) :: water_dcp_dT_memo, water_dcp_dP_memo, ice_dcp_dT_memo, ice_dcp_dP_memo
+    type(type_saturation_memo) :: saturation_memo
+
 contains
+
+    !> Whether `memo` holds the evaluation at \((T_K, P_{abs})\).
+    pure logical function holds(memo, T_K, P_abs)
+        implicit none
+        type(type_iapws_memo), intent(in) :: memo
+        real(real64), intent(in) :: T_K
+        real(real64), intent(in) :: P_abs
+
+        holds = memo%filled .and. memo%T_K == T_K .and. memo%P_abs == P_abs
+    end function holds
+
+    !> Make `water_memo` hold the IAPWS-97 properties of liquid water at \((T_K, P_{abs})\).
+    subroutine refresh_water_memo(self, T_K, P_abs)
+        implicit none
+        class(abst_constitutive), intent(in) :: self
+        real(real64), intent(in) :: T_K
+        real(real64), intent(in) :: P_abs
+
+        if (holds(water_memo, T_K, P_abs)) return
+        call self%water%calc_properties(T_K, P_abs, water_memo%property)
+        water_memo = type_iapws_memo(T_K, P_abs, .true., 0.0d0, water_memo%property)
+    end subroutine refresh_water_memo
+
+    !> Make `ice_memo` hold the IAPWS-06 properties of ice Ih at \((T_K, P_{abs})\).
+    subroutine refresh_ice_memo(self, T_K, P_abs)
+        implicit none
+        class(abst_constitutive), intent(in) :: self
+        real(real64), intent(in) :: T_K
+        real(real64), intent(in) :: P_abs
+
+        if (holds(ice_memo, T_K, P_abs)) return
+        call self%ice%calc_properties(T_K, P_abs, ice_memo%property)
+        ice_memo = type_iapws_memo(T_K, P_abs, .true., 0.0d0, ice_memo%property)
+    end subroutine refresh_ice_memo
+
+    !> Make the water heat-capacity derivative memos hold \((\partial c_p/\partial T, \partial c_p/\partial p)\)
+    !> at \((T_K, P_{abs})\), both from one IAPWS-97 evaluation.
+    subroutine refresh_water_dcp_memos(self, T_K, P_abs)
+        implicit none
+        class(abst_constitutive), intent(in) :: self
+        real(real64), intent(in) :: T_K
+        real(real64), intent(in) :: P_abs
+
+        real(real64) :: dcp_dT, dcp_dP
+
+        ! The two memos are only ever filled together.
+        if (holds(water_dcp_dT_memo, T_K, P_abs)) return
+        call self%water%calc_cp_derivatives(T_K, P_abs, dcp_dT, dcp_dP)
+        water_dcp_dT_memo = type_iapws_memo(T_K, P_abs, .true., dcp_dT, water_dcp_dT_memo%property)
+        water_dcp_dP_memo = type_iapws_memo(T_K, P_abs, .true., dcp_dP, water_dcp_dP_memo%property)
+    end subroutine refresh_water_dcp_memos
+
+    !> Make `saturation_memo` hold the IAPWS-97 saturation quantities at \(T_K\).
+    subroutine refresh_saturation_memo(self, T_K)
+        implicit none
+        class(abst_constitutive), intent(in) :: self
+        real(real64), intent(in) :: T_K
+
+        if (saturation_memo%filled .and. saturation_memo%T_K == T_K) return
+        call self%water%calc_saturation_properties(T_K, rho_vap=saturation_memo%rho, &
+                                                   drho_dT_vap=saturation_memo%drho_dT, &
+                                                   drho_dP_vap=saturation_memo%drho_dP, &
+                                                   density_dT_vap=saturation_memo%density_dT, &
+                                                   cp_vap=saturation_memo%cp, &
+                                                   dcp_dT_vap=saturation_memo%dcp_dT, &
+                                                   latent_heat=saturation_memo%latent_heat, &
+                                                   dlatent_heat_dT=saturation_memo%dlatent_heat_dT)
+        saturation_memo%T_K = T_K
+        saturation_memo%filled = .true.
+    end subroutine refresh_saturation_memo
 
     pure logical function is_valid_iapws97_liquid_state(T_K, P_abs)
         implicit none
@@ -254,6 +384,25 @@ contains
         end if
     end subroutine get_thermo_state_T
 
+    !> Whether the properties are evaluated at a pressure that does not follow \(p_w\).
+    !>
+    !> `get_thermo_state_TP` holds the absolute pressure at atmospheric for a
+    !> negative gauge pressure and for an unset one, so every pressure
+    !> derivative of a property is zero there.
+    logical function is_pressure_held(self, state)
+        implicit none
+        class(abst_constitutive), intent(in) :: self
+        type(type_state), intent(in) :: state
+
+        real(real64) :: pressure
+        logical :: is_set
+
+        call state%pressure%get(pressure, is_set=is_set)
+        is_pressure_held = .true.
+        if (.not. is_set) return
+        is_pressure_held = pressure < 0.0d0
+    end function is_pressure_held
+
     !> Calculate liquid water density
     !>
     !> Mathematical definition:
@@ -292,7 +441,8 @@ contains
             density = reference_water_density
             return
         end if
-        call self%water%calc_rho(T_K, P_abs, density)
+        call refresh_water_memo(self, T_K, P_abs)
+        density = water_memo%property%rho
     end subroutine calc_rho_water_abst_constitutive
 
     !> Calculate temperature derivative of water density
@@ -332,7 +482,8 @@ contains
             deriv_density = 0.0d0
             return
         end if
-        call self%water%calc_drho_dT(T_K, P_abs, deriv_density)
+        call refresh_water_memo(self, T_K, P_abs)
+        deriv_density = water_memo%property%drho_dT
     end subroutine calc_drho_water_dT_abst_constitutive
 
     !> Calculate pressure derivative of water density
@@ -368,11 +519,12 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        if (.not. is_valid_iapws97_liquid_state(T_K, P_abs)) then
+        if (.not. is_valid_iapws97_liquid_state(T_K, P_abs) .or. self%is_pressure_held(state)) then
             deriv_density = 0.0d0
             return
         end if
-        call self%water%calc_drho_dP(T_K, P_abs, deriv_density)
+        call refresh_water_memo(self, T_K, P_abs)
+        deriv_density = water_memo%property%drho_dP
     end subroutine calc_drho_water_dP_abst_constitutive
 
     !> Calculate specific heat capacity of water
@@ -412,8 +564,68 @@ contains
             cp = 4181.3d0
             return
         end if
-        call self%water%calc_cp(T_K, P_abs, cp)
+        call refresh_water_memo(self, T_K, P_abs)
+        cp = water_memo%property%cp
     end subroutine calc_cp_water_abst_constitutive
+
+    !> Temperature derivative of the specific heat of water.
+    !>
+    !> \[ \left(\frac{\partial c_p}{\partial T}\right)_P \]
+    !>
+    !> Assumptions: the same IAPWS-97 range as `calc_cp_water`; outside it the
+    !> specific heat is a fixed reference value, so the derivative is zero.
+    !> Numerical guarantees: defined by the IAPWS-97 Gibbs function.
+    !> Computational complexity: \(O(1)\) memory and arithmetic.
+    !> Failure behavior: returns without error.
+    subroutine calc_dcp_water_dT_abst_constitutive(self, state, deriv_cp)
+        implicit none
+        !> Constitutive model object
+        class(abst_constitutive), intent(in) :: self
+        !> Thermodynamic state; not modified
+        type(type_state), intent(in) :: state
+        !> \(\partial c_p/\partial T\), J/(kg K2); overwritten on exit
+        real(real64), intent(inout) :: deriv_cp
+
+        real(real64) :: T_K, P_abs
+
+        call self%get_thermo_state_TP(state, T_K, P_abs)
+        if (.not. is_valid_iapws97_liquid_state(T_K, P_abs)) then
+            deriv_cp = 0.0d0
+            return
+        end if
+        call refresh_water_dcp_memos(self, T_K, P_abs)
+        deriv_cp = water_dcp_dT_memo%value
+    end subroutine calc_dcp_water_dT_abst_constitutive
+
+    !> Pore-pressure derivative of the specific heat of water.
+    !>
+    !> \[ \left(\frac{\partial c_p}{\partial p_w}\right)_T \]
+    !>
+    !> Assumptions: as `calc_dcp_water_dT`; the property is evaluated at
+    !> atmospheric pressure while the gauge pressure is negative (see
+    !> `shift_pressure_absolute`), where the derivative is therefore zero.
+    !> Numerical guarantees: defined by the IAPWS-97 Gibbs function.
+    !> Computational complexity: \(O(1)\) memory and arithmetic.
+    !> Failure behavior: returns without error.
+    subroutine calc_dcp_water_dP_abst_constitutive(self, state, deriv_cp)
+        implicit none
+        !> Constitutive model object
+        class(abst_constitutive), intent(in) :: self
+        !> Thermodynamic state; not modified
+        type(type_state), intent(in) :: state
+        !> \(\partial c_p/\partial p_w\), J/(kg K Pa); overwritten on exit
+        real(real64), intent(inout) :: deriv_cp
+
+        real(real64) :: T_K, P_abs
+
+        call self%get_thermo_state_TP(state, T_K, P_abs)
+        if (.not. is_valid_iapws97_liquid_state(T_K, P_abs) .or. self%is_pressure_held(state)) then
+            deriv_cp = 0.0d0
+            return
+        end if
+        call refresh_water_dcp_memos(self, T_K, P_abs)
+        deriv_cp = water_dcp_dP_memo%value
+    end subroutine calc_dcp_water_dP_abst_constitutive
 
     !> Calculate ice density
     !>
@@ -446,7 +658,8 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        call self%ice%calc_rho(T_K, P_abs, density)
+        call refresh_ice_memo(self, T_K, P_abs)
+        density = ice_memo%property%rho
     end subroutine calc_rho_ice_abst_constitutive
 
     !> Calculate temperature derivative of ice density
@@ -480,7 +693,8 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        call self%ice%calc_drho_dT(T_K, P_abs, deriv_density)
+        call refresh_ice_memo(self, T_K, P_abs)
+        deriv_density = ice_memo%property%drho_dT
     end subroutine calc_drho_ice_dT_abst_constitutive
 
     !> Calculate pressure derivative of ice density
@@ -514,7 +728,12 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        call self%ice%calc_drho_dP(T_K, P_abs, deriv_density)
+        if (self%is_pressure_held(state)) then
+            deriv_density = 0.0d0
+            return
+        end if
+        call refresh_ice_memo(self, T_K, P_abs)
+        deriv_density = ice_memo%property%drho_dP
     end subroutine calc_drho_ice_dP_abst_constitutive
 
     !> Calculate specific heat capacity of ice
@@ -548,8 +767,68 @@ contains
         real(real64) :: T_K, P_abs
 
         call self%get_thermo_state_TP(state, T_K, P_abs)
-        call self%ice%calc_cp(T_K, P_abs, cp)
+        call refresh_ice_memo(self, T_K, P_abs)
+        cp = ice_memo%property%cp
     end subroutine calc_cp_ice_abst_constitutive
+
+    !> Temperature derivative of the specific heat of ice.
+    !>
+    !> \[ \left(\frac{\partial c_p}{\partial T}\right)_P \]
+    !>
+    !> Assumptions: none beyond the IAPWS-06 Ih formulation.
+    !> Numerical guarantees: defined by the IAPWS-06 Gibbs function.
+    !> Computational complexity: \(O(1)\) memory and arithmetic.
+    !> Failure behavior: returns without error.
+    subroutine calc_dcp_ice_dT_abst_constitutive(self, state, deriv_cp)
+        implicit none
+        !> Constitutive model object
+        class(abst_constitutive), intent(in) :: self
+        !> Thermodynamic state; not modified
+        type(type_state), intent(in) :: state
+        !> \(\partial c_p/\partial T\), J/(kg K2); overwritten on exit
+        real(real64), intent(inout) :: deriv_cp
+
+        real(real64) :: T_K, P_abs
+
+        call self%get_thermo_state_TP(state, T_K, P_abs)
+        if (.not. holds(ice_dcp_dT_memo, T_K, P_abs)) then
+            call self%ice%calc_dcp_dT(T_K, P_abs, deriv_cp)
+            ice_dcp_dT_memo = type_iapws_memo(T_K, P_abs, .true., deriv_cp, ice_dcp_dT_memo%property)
+        end if
+        deriv_cp = ice_dcp_dT_memo%value
+    end subroutine calc_dcp_ice_dT_abst_constitutive
+
+    !> Pore-pressure derivative of the specific heat of ice.
+    !>
+    !> \[ \left(\frac{\partial c_p}{\partial p_w}\right)_T \]
+    !>
+    !> Assumptions: the property is evaluated at atmospheric pressure while the
+    !> gauge pressure is negative, where the derivative is therefore zero.
+    !> Numerical guarantees: defined by the IAPWS-06 Gibbs function.
+    !> Computational complexity: \(O(1)\) memory and arithmetic.
+    !> Failure behavior: returns without error.
+    subroutine calc_dcp_ice_dP_abst_constitutive(self, state, deriv_cp)
+        implicit none
+        !> Constitutive model object
+        class(abst_constitutive), intent(in) :: self
+        !> Thermodynamic state; not modified
+        type(type_state), intent(in) :: state
+        !> \(\partial c_p/\partial p_w\), J/(kg K Pa); overwritten on exit
+        real(real64), intent(inout) :: deriv_cp
+
+        real(real64) :: T_K, P_abs
+
+        call self%get_thermo_state_TP(state, T_K, P_abs)
+        if (self%is_pressure_held(state)) then
+            deriv_cp = 0.0d0
+            return
+        end if
+        if (.not. holds(ice_dcp_dP_memo, T_K, P_abs)) then
+            call self%ice%calc_dcp_dP(T_K, P_abs, deriv_cp)
+            ice_dcp_dP_memo = type_iapws_memo(T_K, P_abs, .true., deriv_cp, ice_dcp_dP_memo%property)
+        end if
+        deriv_cp = ice_dcp_dP_memo%value
+    end subroutine calc_dcp_ice_dP_abst_constitutive
 
     !> Calculate vapor density
     !>
@@ -585,8 +864,8 @@ contains
         T_K = min(max(T_K, water_triple_point_temperature), water_critical_point_temperature)
         call state%relative_humidity%get(relative_humidity)
 
-        call self%water%calc_saturation_density(T_K, density)
-        density = max(density * relative_humidity, min_vapor_density)
+        call refresh_saturation_memo(self, T_K)
+        density = max(saturation_memo%rho * relative_humidity, min_vapor_density)
     end subroutine calc_rho_vapor_abst_constitutive
 
     !> Calculate temperature derivative of vapor density
@@ -623,7 +902,8 @@ contains
         T_K = min(max(T_K, water_triple_point_temperature), water_critical_point_temperature)
         call state%relative_humidity%get(relative_humidity)
 
-        call self%water%calc_saturation_drho_dT(T_K, drho_sat_dT)
+        call refresh_saturation_memo(self, T_K)
+        drho_sat_dT = saturation_memo%drho_dT
 
         deriv_density = drho_sat_dT * relative_humidity
     end subroutine calc_drho_vapor_dT_abst_constitutive
@@ -691,16 +971,20 @@ contains
 
         call self%get_thermo_state_T(state, T_K)
         T_K = min(max(T_K, water_triple_point_temperature), water_critical_point_temperature)
-        call self%water%calc_saturation_density(T_K, density)
+        call refresh_saturation_memo(self, T_K)
+        density = saturation_memo%rho
     end subroutine calc_rho_vapor_saturation_abst_constitutive
 
     !> Calculate temperature derivative of saturation vapor density
     !>
     !> Mathematical definition:
-    !> - \(\frac{\partial \rho_{sat}}{\partial T}\)
+    !> - \(\frac{\mathrm{d}\rho_{sat}}{\mathrm{d}T}\), the total derivative of
+    !>   \(\rho''(T,p_s(T))\) along the saturation line, which is the curve
+    !>   `calc_rho_vapor_saturation` evaluates on
     !>
     !> Assumptions:
-    !> - None
+    !> - Outside the triple-to-critical range the value is held at the bound,
+    !>   so the derivative there is zero
     !>
     !> Numerical guarantee:
     !> - Defined by IAPWS-97 standard
@@ -725,8 +1009,12 @@ contains
         real(real64) :: T_K
 
         call self%get_thermo_state_T(state, T_K)
-        T_K = min(max(T_K, water_triple_point_temperature), water_critical_point_temperature)
-        call self%water%calc_saturation_drho_dT(T_K, deriv_density)
+        if (T_K < water_triple_point_temperature .or. T_K > water_critical_point_temperature) then
+            deriv_density = 0.0d0
+            return
+        end if
+        call refresh_saturation_memo(self, T_K)
+        deriv_density = saturation_memo%density_dT
     end subroutine calc_drho_vapor_saturation_dT_abst_constitutive
 
     !> Calculate pressure derivative of saturation vapor density
@@ -761,7 +1049,8 @@ contains
 
         call self%get_thermo_state_T(state, T_K)
         T_K = min(max(T_K, water_triple_point_temperature), water_critical_point_temperature)
-        call self%water%calc_saturation_drho_dP(T_K, deriv_density)
+        call refresh_saturation_memo(self, T_K)
+        deriv_density = saturation_memo%drho_dP
     end subroutine calc_drho_vapor_saturation_dP_abst_constitutive
 
     !> Calculate specific heat capacity of vapor
@@ -796,8 +1085,83 @@ contains
 
         call self%get_thermo_state_T(state, T_K)
         T_K = min(max(T_K, water_triple_point_temperature), water_critical_point_temperature)
-        call self%water%calc_saturation_cp(T_K, cp)
+        call refresh_saturation_memo(self, T_K)
+        cp = saturation_memo%cp
     end subroutine calc_cp_vapor_abst_constitutive
+
+    !> Temperature derivative of the specific heat of saturated vapour.
+    !>
+    !> \[ \frac{\mathrm{d}c_p''}{\mathrm{d}T}, \]
+    !>
+    !> the total derivative along the saturation line, which is the curve
+    !> `calc_cp_vapor` evaluates on.
+    !>
+    !> Assumptions: outside the triple-to-critical range `calc_cp_vapor` holds
+    !> the temperature at the bound, so the derivative there is zero.
+    !> Numerical guarantees: defined by IAPWS-97 regions 2 and 4.
+    !> Computational complexity: \(O(1)\) memory and arithmetic.
+    !> Failure behavior: returns without error.
+    subroutine calc_dcp_vapor_dT_abst_constitutive(self, state, deriv_cp)
+        implicit none
+        !> Constitutive model object
+        class(abst_constitutive), intent(in) :: self
+        !> Thermodynamic state; not modified
+        type(type_state), intent(in) :: state
+        !> \(\mathrm{d}c_p''/\mathrm{d}T\), J/(kg K2); overwritten on exit
+        real(real64), intent(inout) :: deriv_cp
+
+        real(real64) :: T_K
+
+        call self%get_thermo_state_T(state, T_K)
+        if (T_K < water_triple_point_temperature .or. T_K > water_critical_point_temperature) then
+            deriv_cp = 0.0d0
+            return
+        end if
+        call refresh_saturation_memo(self, T_K)
+        deriv_cp = saturation_memo%dcp_dT
+    end subroutine calc_dcp_vapor_dT_abst_constitutive
+
+    !> Latent heat of vaporization on the IAPWS-97 saturation line.
+    !>
+    !> \[ L_v(T) = h''(T) - h'(T) \]
+    !>
+    !> Assumptions: \(T\) lies between the triple and the critical point.
+    !> Numerical guarantees: that of IAPWS-97; no theoretical error bound available.
+    !> Computational complexity: \(O(1)\) arithmetic and memory.
+    !> Failure behavior: IAPWS returns NaN outside the saturation line.
+    subroutine calc_latent_heat_saturation_abst_constitutive(self, T_K, latent_heat)
+        implicit none
+        !> Constitutive model object
+        class(abst_constitutive), intent(in) :: self
+        !> Absolute temperature, K, on the saturation line
+        real(real64), intent(in) :: T_K
+        !> \(L_v\), J/kg; overwritten on exit
+        real(real64), intent(inout) :: latent_heat
+
+        call refresh_saturation_memo(self, T_K)
+        latent_heat = saturation_memo%latent_heat
+    end subroutine calc_latent_heat_saturation_abst_constitutive
+
+    !> Temperature derivative of the latent heat of vaporization along the saturation line.
+    !>
+    !> \[ \frac{\mathrm{d}L_v}{\mathrm{d}T} \]
+    !>
+    !> Assumptions: \(T\) lies between the triple and the critical point.
+    !> Numerical guarantees: that of IAPWS-97; no theoretical error bound available.
+    !> Computational complexity: \(O(1)\) arithmetic and memory.
+    !> Failure behavior: IAPWS returns NaN outside the saturation line.
+    subroutine calc_dlatent_heat_saturation_dT_abst_constitutive(self, T_K, deriv_latent_heat)
+        implicit none
+        !> Constitutive model object
+        class(abst_constitutive), intent(in) :: self
+        !> Absolute temperature, K, on the saturation line
+        real(real64), intent(in) :: T_K
+        !> \(\mathrm{d}L_v/\mathrm{d}T\), J/(kg K); overwritten on exit
+        real(real64), intent(inout) :: deriv_latent_heat
+
+        call refresh_saturation_memo(self, T_K)
+        deriv_latent_heat = saturation_memo%dlatent_heat_dT
+    end subroutine calc_dlatent_heat_saturation_dT_abst_constitutive
 
     !> Initialize the IAPWS wrapper
     !>

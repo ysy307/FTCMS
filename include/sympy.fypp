@@ -1,0 +1,170 @@
+#:mute
+    #! Closed-form laws stated in SymPy, expanded into pure Fortran routines.
+    #!
+    #! A law is a dict made by sympy_law. sympy_value_routine(law) expands
+    #! evaluate_<name>, the value, and sympy_tangent_routine(law) expands
+    #! evaluate_<name>_tangent, the value with df = sum_k (df/dx_k) dx_k over the
+    #! law's inputs, each of which carries a tangent argument dx_k(:). The partials
+    #! are sympy.diff of the stated expression and sympy.cse shares their common
+    #! subexpressions with the value; nothing is differenced.
+    #!
+    #! Needs fypp -m sympy.printing.fortran -m textwrap.
+
+    #:set sp = sympy
+
+    #! A real symbol; assumptions such as positive=True let SymPy combine powers.
+    #:set sympy_real = lambda name, **assumptions: sp.Symbol(name, real=True, **assumptions)
+
+    #! pi comes out of derivatives such as erfc's and is declared like any constant.
+    #:set SYMPY_PI = (sp.Symbol('pi', positive=True), 'acos(-1.0d0)', 'The circle ratio.')
+
+    #! sign(x) is printed as x/|x|: the default dsign is obsolescent, and a law that
+    #! differentiates |x| assumes x /= 0.
+    #:set sympy_prepare = lambda expr: sp.sympify(expr).replace(sp.sign, lambda x: x / sp.Abs(x)).subs(sp.pi, SYMPY_PI[0])
+
+    #! The expression printer of fcode without doprint's 72-column folding; fypp
+    #! folds at 132 instead. A fresh printer per expression: a shared one renames
+    #! a symbol it has already seen with other assumptions. erfc is declared an
+    #! intrinsic, which the default prints as 1 - erf and cancels in the tail.
+    #:set sympy_fortran = lambda expr: sp.printing.fortran.FCodePrinter({'source_format': 'free', 'standard': 2008, &
+        & 'user_functions': {'erfc': 'erfc'}})._print(expr)
+
+    #! FORD lines of one paragraph at the given indentation.
+    #:set sympy_doc = lambda text, indent: '\n'.join([indent + '!> ' + line for line in &
+        & textwrap.wrap(text, 128 - len(indent), break_long_words=False, break_on_hyphens=False)] or [indent + '!>'])
+
+    #! parameters: [(symbol, doc)], no tangent. inputs: [(symbol, doc)], each with a
+    #! tangent. outputs: [(name, expr, doc)]. constants: [(symbol, literal, doc)],
+    #! literals kept symbolic because SymPy distributes a numeric factor over a sum.
+    #! evaluated: [(symbol, doc, [d symbol/d input_k])], a value the caller computes
+    #! (a special function) with the derivative it has in each input.
+    #:set sympy_law = lambda name, summary, definition, assumptions, parameters, inputs, outputs, constants=(), &
+        & evaluated=(), tangent=True: dict(name=name, summary=summary, definition=definition, assumptions=assumptions, &
+        & parameters=list(parameters), inputs=list(inputs), outputs=list(outputs), constants=list(constants), &
+        & evaluated=list(evaluated), tangent=tangent)
+
+    #! d expr/d input_k, through the evaluated values as well.
+    #:set sympy_partial = lambda law, expr, k: sp.diff(expr, law['inputs'][k][0]) + &
+        & sum([sp.diff(expr, value[0]) * value[2][k] for value in law['evaluated']], sp.Integer(0))
+
+    #! Every symbol the reduced expressions of a cse use.
+    #:set sympy_used = lambda reduced: set().union(*[expr.free_symbols for expr in [pair[1] for pair in reduced[0]] + &
+        & list(reduced[1])])
+
+    #:def sympy_documentation(law, tangent)
+        #:if tangent
+$:sympy_doc(law['summary'].rstrip('.') + ', with its tangent.', '    ')
+    !>
+$:sympy_doc(r'\[ ' + law['definition'] + r',\qquad \mathrm{d}f=\sum_k \frac{\partial f}{\partial x_k}\,\mathrm{d}x_k \]', '    ')
+    !>
+$:sympy_doc('Assumptions: ' + law['assumptions'], '    ')
+$:sympy_doc('Numerical guarantees: The tangent is the derivative of the expression `evaluate_' + law['name'] &
+    & + '` evaluates, formed symbolically; no theoretical error bound available.', '    ')
+$:sympy_doc(r'Computational complexity: \(O(n)\) arithmetic in the number \(n\) of tangent directions, \(O(1)\) memory.', &
+    & '    ')
+        #:else
+$:sympy_doc(law['summary'], '    ')
+    !>
+$:sympy_doc(r'\[ ' + law['definition'] + r' \]', '    ')
+    !>
+$:sympy_doc('Assumptions: ' + law['assumptions'], '    ')
+$:sympy_doc('Numerical guarantees: Evaluates the stated expression; no theoretical error bound available.', '    ')
+$:sympy_doc(r'Computational complexity: \(O(1)\) arithmetic and memory.', '    ')
+        #:endif
+$:sympy_doc('Failure behavior: none; outside the assumptions the IEEE result is returned.', '    ')
+    #:enddef
+
+    #:def sympy_declarations(constants, temporaries)
+        #:for constant in constants
+        ! ${constant[2]}$
+        real(real64), parameter :: ${constant[0].name}$ = ${constant[1]}$
+        #:endfor
+        #:for start in range(0, len(temporaries), 8)
+        real(real64) :: ${', '.join(temporaries[start:start + 8])}$
+        #:endfor
+        #:if constants or temporaries
+
+        #:endif
+    #:enddef
+
+    #:def sympy_value_routine(law)
+        #:set reduced = sp.cse([sympy_prepare(output[1]) for output in law['outputs']], symbols=sp.numbered_symbols('aux'))
+        #:set used = sympy_used(reduced)
+        #:assert all([argument[0] in used for argument in law['inputs']])
+        #:set arguments = [argument for argument in law['parameters'] + [value[0:2] for value in law['evaluated']] &
+            & + law['inputs'] if argument[0] in used]
+        #:set names = [argument[0].name for argument in arguments] + [output[0] for output in law['outputs']]
+$:sympy_documentation(law, False)
+    pure subroutine evaluate_${law['name']}$(${', '.join(names)}$)
+        implicit none
+        #:for argument in arguments
+$:sympy_doc(argument[1], '        ')
+        real(real64), intent(in) :: ${argument[0].name}$
+        #:endfor
+        #:for output in law['outputs']
+$:sympy_doc(output[2] + ' Overwritten on exit.', '        ')
+        real(real64), intent(inout) :: ${output[0]}$
+        #:endfor
+
+$:sympy_declarations([constant for constant in law['constants'] + [SYMPY_PI] if constant[0] in used], &
+    & [str(pair[0]) for pair in reduced[0]])
+        #:for pair in reduced[0]
+        ${pair[0]}$ = ${sympy_fortran(pair[1])}$
+        #:endfor
+        #:for output, expr in zip(law['outputs'], reduced[1])
+        ${output[0]}$ = ${sympy_fortran(expr)}$
+        #:endfor
+    end subroutine evaluate_${law['name']}$
+    #:enddef
+
+    #:def sympy_tangent_routine(law)
+        #! Per output: its value, then its partial in each input.
+        #:set stride = 1 + len(law['inputs'])
+        #:set reduced = sp.cse(sum([[sympy_prepare(output[1])] + [sympy_prepare(sympy_partial(law, output[1], k)) &
+            & for k in range(len(law['inputs']))] for output in law['outputs']], []), symbols=sp.numbered_symbols('aux'))
+        #:set used = sympy_used(reduced)
+        #:assert all([argument[0] in used for argument in law['inputs']])
+        #:set parameters = [argument for argument in law['parameters'] + [value[0:2] for value in law['evaluated']] &
+            & if argument[0] in used]
+        #:set partials = [k for k in range(len(reduced[1])) if k % stride != 0 and reduced[1][k] != 0]
+        #:set names = [argument[0].name for argument in parameters] &
+            & + sum([[argument[0].name, 'd' + argument[0].name] for argument in law['inputs']], []) &
+            & + sum([[output[0], 'd' + output[0]] for output in law['outputs']], [])
+$:sympy_documentation(law, True)
+    pure subroutine evaluate_${law['name']}$_tangent(${', '.join(names)}$)
+        implicit none
+        #:for argument in parameters
+$:sympy_doc(argument[1], '        ')
+        real(real64), intent(in) :: ${argument[0].name}$
+        #:endfor
+        #:for argument in law['inputs']
+$:sympy_doc(argument[1], '        ')
+        real(real64), intent(in) :: ${argument[0].name}$
+$:sympy_doc('Tangent of `' + argument[0].name + '` in each direction the caller differentiates in; every tangent ' &
+    & + 'argument has the same size.', '        ')
+        real(real64), intent(in) :: d${argument[0].name}$(:)
+        #:endfor
+        #:for output in law['outputs']
+$:sympy_doc(output[2] + ' Overwritten on exit.', '        ')
+        real(real64), intent(inout) :: ${output[0]}$
+$:sympy_doc('Tangent of `' + output[0] + '`, the size of the input tangents. Overwritten on exit.', '        ')
+        real(real64), intent(inout) :: d${output[0]}$(:)
+        #:endfor
+
+$:sympy_declarations([constant for constant in law['constants'] + [SYMPY_PI] if constant[0] in used], &
+    & [str(pair[0]) for pair in reduced[0]] + ['partial{}'.format(k) for k in partials])
+        #:for pair in reduced[0]
+        ${pair[0]}$ = ${sympy_fortran(pair[1])}$
+        #:endfor
+        #:for i, output in enumerate(law['outputs'])
+        ${output[0]}$ = ${sympy_fortran(reduced[1][i * stride])}$
+            #:for k in [k for k in range(len(law['inputs'])) if i * stride + 1 + k in partials]
+        partial${i * stride + 1 + k}$ = ${sympy_fortran(reduced[1][i * stride + 1 + k])}$
+            #:endfor
+            #:set terms = ' + '.join(['partial{0}*d{1}(:)'.format(i * stride + 1 + k, argument[0].name) &
+                & for k, argument in enumerate(law['inputs']) if i * stride + 1 + k in partials]) or '0.0d0'
+        d${output[0]}$(:) = ${terms}$
+        #:endfor
+    end subroutine evaluate_${law['name']}$_tangent
+    #:enddef
+#:endmute

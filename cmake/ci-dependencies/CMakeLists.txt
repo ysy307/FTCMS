@@ -51,23 +51,7 @@ ExternalProject_Add(json_fortran
 
 ExternalProject_Add(iapws
     GIT_REPOSITORY https://github.com/ysy307/IAPWS.git
-    GIT_TAG 9c6c27b9448a5ac0b06efedbbd5bd2d25d580cb1
+    GIT_TAG 9c75bae6243de938a5bd2bdd1b90b4e850832ddd
     UPDATE_DISCONNECTED TRUE
     CMAKE_ARGS ${common_cmake_args}
-)
-
-ExternalProject_Add(vtk
-    URL https://www.vtk.org/files/release/9.5/VTK-9.5.0.tar.gz
-    URL_HASH SHA256=04ae86246b9557c6b61afbc534a6df099244fbc8f3937f82e6bc0570953af87d
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    UPDATE_DISCONNECTED TRUE
-    CMAKE_ARGS
-        ${common_cmake_args}
-        -DVTK_BUILD_TESTING:BOOL=OFF
-        -DVTK_GROUP_ENABLE_Rendering:STRING=DONT_WANT
-        -DVTK_GROUP_ENABLE_StandAlone:STRING=DONT_WANT
-        -DVTK_MODULE_ENABLE_VTK_CommonCore:STRING=YES
-        -DVTK_MODULE_ENABLE_VTK_CommonDataModel:STRING=YES
-        -DVTK_MODULE_ENABLE_VTK_IOLegacy:STRING=YES
-        -DVTK_MODULE_ENABLE_VTK_IOXML:STRING=YES
 )

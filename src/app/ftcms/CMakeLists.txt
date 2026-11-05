@@ -7,13 +7,17 @@ add_library(SOLVER_FTCMS STATIC)
 # Sources
 # ------------------------------------------------------------
 target_sources(SOLVER_FTCMS PRIVATE
+    ftcms_darcy.F90
+    ftcms_closure.F90
+    ftcms_kernels.F90
+    ftcms_kernels_lagrange.F90
+    ftcms_kernels_advection.F90
+    ftcms_nodal_flux.F90
+    ftcms_boundary_registry.F90
     ftcms_interface.F90
-    ftcms_base.F90
-    ftcms_boundary.F90
-    ftcms_assemble.F90
-    ftcms_fd_jacobian.F90
-    ftcms_compute.F90
-    ftcms_solve.F90
+    ftcms_setup.F90
+    ftcms_step.F90
+    ftcms_output.F90
     ftcms_assimilation.F90
     ftcms.F90
 )
@@ -28,14 +32,12 @@ target_include_directories(SOLVER_FTCMS PUBLIC
 # ------------------------------------------------------------
 # Dependencies
 # ------------------------------------------------------------
+# The governing layer supplies the constitutive models the closure evaluates
+# and the boundary strategies; the input layer the project definition.
 target_link_libraries(SOLVER_FTCMS PUBLIC
     SOLVER::GOVERNING
     SOLVER::CORE
-    SOLVER::CONTROL
     SOLVER::INPUT
-    SOLVER::OUTPUT
-    SOLVER::LINALG
-    SOLVER::SOLVER
 )
 
 enable_build_flags(SOLVER_FTCMS)

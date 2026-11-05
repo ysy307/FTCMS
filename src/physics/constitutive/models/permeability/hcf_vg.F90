@@ -1,4 +1,7 @@
 submodule(models_hcf) hcf_vg
+    use :: constitutive_laws, only:evaluate_kr_van_genuchten, evaluate_kr_van_genuchten_tangent, &
+        evaluate_van_genuchten_mualem_argument, evaluate_kr_van_genuchten_mualem, &
+        evaluate_kr_van_genuchten_mualem_tangent
     implicit none
 contains
 
@@ -38,39 +41,48 @@ contains
     !> the closed form is used as a fallback).  Computational complexity: O(1);
     !> the continued fraction converges in a few dozen terms.  Failure behavior:
     !> returns the closed-form value if the beta continued fraction fails to
-    !> converge (does not abort).
-    module subroutine calc_kr_base_vg(self, h, kr)
+    !> converge (does not abort). The head derivative is that of the branch the
+    !> value came from.
+    module subroutine calc_kr_base_vg(self, h, kr, dkr_dh)
         implicit none
         class(type_hcf_base_vg), intent(in) :: self
         real(real64), intent(in) :: h
         real(real64), intent(inout) :: kr
+        real(real64), intent(inout), optional :: dkr_dh
 
         real(real64), parameter :: m_consistent_tolerance = 1.0d-9
-        real(real64) :: effective_saturation, zeta, beta_value
+        real(real64) :: zeta, beta_value, dkr(1)
         logical :: converged
 
         associate (params => self%parent%config)
-            if (h < 0.0d0) then
-                effective_saturation = (1.0d0 + (-params%alpha1 * h)**params%n1)**(-params%m1)
-            else
-                effective_saturation = 1.0d0
+            converged = .false.
+            beta_value = 0.0d0
+            if (h < 0.0d0 .and. .not. (abs(params%m1 - (1.0d0 - 1.0d0 / params%n1)) <= m_consistent_tolerance .or. &
+                                         params%n1 <= 1.0d0)) then
+                call evaluate_van_genuchten_mualem_argument(params%alpha1, params%n1, h, zeta)
+                call self%incomplete_beta%evaluate(zeta, beta_value, converged)
             end if
 
-            if (abs(params%m1 - (1.0d0 - 1.0d0 / params%n1)) <= m_consistent_tolerance .or. &
-                params%n1 <= 1.0d0) then
-                kr = effective_saturation**params%l * &
-                     (1.0d0 - (1.0d0 - effective_saturation**(1.0d0 / params%m1))**params%m1)**2
-            else
-                zeta = effective_saturation**(1.0d0 / params%m1)
-                beta_value = 0.0d0
-                converged = .false.
-                call self%incomplete_beta%evaluate(zeta, beta_value, converged)
-                if (converged) then
-                    kr = effective_saturation**params%l * beta_value**2
+            if (.not. (h < 0.0d0)) then
+                ! A non-negative head is saturated: k_r = 1 on either branch.
+                kr = 1.0d0
+                if (present(dkr_dh)) dkr_dh = 0.0d0
+            else if (converged) then
+                if (present(dkr_dh)) then
+                    ! The beta parameters initialize_hcf_base_vg set up.
+                    call evaluate_kr_van_genuchten_mualem_tangent(params%alpha1, params%n1, params%m1, params%l, &
+                                                                  params%m1 + 1.0d0 / params%n1, 1.0d0 - 1.0d0 / params%n1, &
+                                                                  self%incomplete_beta%get_log_normalization(), &
+                                                                  beta_value, h, [1.0d0], kr, dkr)
+                    dkr_dh = dkr(1)
                 else
-                    kr = effective_saturation**params%l * &
-                         (1.0d0 - (1.0d0 - effective_saturation**(1.0d0 / params%m1))**params%m1)**2
+                    call evaluate_kr_van_genuchten_mualem(params%alpha1, params%n1, params%m1, params%l, beta_value, h, kr)
                 end if
+            else if (present(dkr_dh)) then
+                call evaluate_kr_van_genuchten_tangent(params%alpha1, params%n1, params%m1, params%l, h, [1.0d0], kr, dkr)
+                dkr_dh = dkr(1)
+            else
+                call evaluate_kr_van_genuchten(params%alpha1, params%n1, params%m1, params%l, h, kr)
             end if
         end associate
     end subroutine calc_kr_base_vg

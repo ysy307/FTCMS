@@ -80,54 +80,20 @@ target_sources(SOLVER_CORE PRIVATE
 # ------------------------------------------------------------
 # Types
 # ------------------------------------------------------------
-set(CORE_TYPES_FYPP
-    types/physics/variable.fypp
-)
-fypp_F90("" "${CORE_TYPES_FYPP}" CORE_TYPES_GENERATED)
-
-set(CORE_VECTOR_FYPP
-    types/algebra/vector/vector_interface.fypp
-    types/algebra/vector/vector_impl.fypp
-)
-fypp_F90("" "${CORE_VECTOR_FYPP}" CORE_VECTOR_GENERATED)
-
-set(CORE_MATRIX_IFACE_FYPP
-    types/algebra/matrix/matrix_interface.fypp
-)
-fypp_F90("-D_MKL" "${CORE_MATRIX_IFACE_FYPP}" CORE_MATRIX_IFACE_GENERATED)
-
 target_sources(SOLVER_CORE PRIVATE
-    # Algebra
-    ${CORE_MATRIX_IFACE_GENERATED}
-    types/algebra/matrix/matrix_dense.F90
-    types/algebra/matrix/matrix.F90
-    ${CORE_VECTOR_GENERATED}
-    types/algebra/vector/vector.F90
     # Config
     types/config/config_base.F90
     types/config/conditions/config_boundary.F90
     types/config/conditions/config_initial.F90
     types/config/conditions/config_conditions.F90
-    types/config/domain/config_nodes.F90
-    types/config/domain/config_elements.F90
-    types/config/domain/config_domain.F90
     types/config/physics/config_physics_base.F90
     types/config/physics/config_constitutive.F90
     types/config/physics/config_swcc.F90
     types/config/physics/config_gcc.F90
     types/config/physics/config_physics.F90
-    types/config/control/config_acceleration.F90
     types/config/control/config_output_manager.F90
     types/config/control/config_control.F90
-    types/config/control/config_iteration.F90
     types/config/control/config_time.F90
-    types/config/control/config_parallel.F90
-    types/config/control/config_control_manager.F90
-    types/config/output/config_output.F90
-    types/config/output/config_overall.F90
-    types/config/output/config_observation.F90
-    # Discritization
-    types/discretization/dof_map.F90
     # geometry
     types/geometry/coordinate_array.F90
     types/geometry/coordinate.F90
@@ -136,17 +102,11 @@ target_sources(SOLVER_CORE PRIVATE
     types/physics/solar.F90
     types/physics/state.F90
     types/physics/state_thc.F90
-    # Topology
-    types/topology/connectivity.F90
-    types/topology/graph.F90
-    types/topology/scatter_map.F90
-    types/topology/system_topology.F90
     # Utils
     types/utils/datetime.F90
     # Core
     types/types.F90
 
-    ${CORE_TYPES_GENERATED}
 )
 
 # ============================================================
@@ -164,31 +124,6 @@ target_sources(SOLVER_CORE PRIVATE
     interop/petscds/petscds_shim.c
     interop/petscds/petscds_wrapper.F90
 
-    # --- Memory Profiling ---
-    interop/memory_profiling/memory_stats.c
-    interop/memory_profiling/memory_stats.F90
-    interop/memory_profiling/memory_stats_wrapper.F90
-
-    # --- Signal Handling ---
-    interop/signal_handling/signal_flag.c
-    interop/signal_handling/signal_flag.F90
-    interop/signal_handling/signal_flag_wrapper.F90
-
-    # --- System Info ---
-    interop/system_info/system_info.c
-    interop/system_info/system_info.F90
-    interop/system_info/system_info_wrapper.F90
-
-    # --- VTK (C++) ---
-    interop/vtk/writer_vtk.cpp
-    interop/vtk/writer_vtu.cpp
-    interop/vtk/c_wrapper.cpp
-
-    # --- VTK (Fortran) ---
-    interop/vtk/vtk_writer_base.F90
-    interop/vtk/vtk_writer_wrapper.F90
-    interop/vtk/vtu_writer_wrapper.F90
-    interop/vtk/vtk_constants.F90
     interop/interop.F90
 )
 
@@ -210,26 +145,6 @@ target_include_directories(SOLVER_CORE
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# C++ standard
-set_target_properties(SOLVER_CORE PROPERTIES
-    CXX_STANDARD 17
-)
-
-# ============================================================
-# 5. External Libraries
-# ============================================================
-
-target_link_libraries(SOLVER_CORE
-    PUBLIC
-    VTK::IOXML
-    VTK::CommonCore
-    VTK::CommonDataModel
-    VTK::IOLegacy
-)
-
-if(WIN32)
-    target_link_libraries(SOLVER_CORE PRIVATE Psapi)
-endif()
 
 # ============================================================
 # 6. Project-specific flags (existing functions kept)
@@ -245,11 +160,4 @@ enable_thirdparty(SOLVER_CORE)
 add_library(SOLVER::CORE ALIAS SOLVER_CORE)
 
 
-# ------------------------------------------------------------
-# PETSc: DMPlex reads, partitions and labels the mesh
-# ------------------------------------------------------------
-set(FTCMS_PETSC_FOR_CORE ON)
-find_package(PkgConfig REQUIRED)
-set(ENV{PKG_CONFIG_PATH} "${PROJECT_SOURCE_DIR}/third_party/.local/${COMPILER_DIR}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-pkg_check_modules(PETSC_CORE REQUIRED IMPORTED_TARGET PETSc)
-target_link_libraries(SOLVER_CORE PUBLIC PkgConfig::PETSC_CORE)
+target_link_libraries(SOLVER_CORE PUBLIC PETSc::PETSc)

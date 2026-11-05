@@ -42,4 +42,15 @@ contains
         if (allocated(self%provider)) call self%provider%update_data(new_values)
     end subroutine update_provider_data_abst_bc
 
+    !> The provider's data at `current_time`, without the state-dependent part.
+    module subroutine get_data_abst_bc(self, current_time, values)
+        implicit none
+        class(abst_bc), intent(inout) :: self
+        real(real64), intent(in) :: current_time
+        real(real64), intent(inout) :: values(BC_DATA_SIZE)
+
+        values = 0.0d0
+        if (allocated(self%provider)) call self%provider%get_data(current_time, values)
+    end subroutine get_data_abst_bc
+
 end submodule strategy_base

@@ -1,5 +1,4 @@
 submodule(io_input_basic) input_basic_solver_settings
-    use omp_lib
     implicit none
 
     !!------------------------------------------------------------------------------------------------------------------------------
@@ -28,13 +27,6 @@ submodule(io_input_basic) input_basic_solver_settings
     character(*), parameter :: linear_solver = "linear_solver"
     character(*), parameter :: iterative_solver = "iterative_solver"
     character(*), parameter :: tolerance = "tolerance"
-
-    character(*), parameter :: parallel_settings = "parallel_settings"
-    character(*), parameter :: threads = "threads"
-    character(*), parameter :: is_parallel = "is_parallel"
-    character(*), parameter :: num_threads = "num_threads"
-    character(*), parameter :: schedule = "schedule"
-    character(*), parameter :: max_active_levels = "max_active_levels"
 
     !!------------------------------------------------------------------------------------------------------------------------------
     ! Valid parameter values (for settings not covered by core_constants)
@@ -84,7 +76,6 @@ contains
 
         call read_solver_settings_nonlinear(self, json)
         call read_solver_settings_linear(self, json)
-        call read_solver_parallel_settings(self, json)
 
     end subroutine read_solver_settings
 
@@ -336,42 +327,6 @@ contains
         options = trim(options)//' '//name//' '//trim(adjustl(value))
     end subroutine append_petsc_option
 
-    subroutine read_solver_parallel_settings(self, json)
-        implicit none
-        class(type_input_basic), intent(inout) :: self
-        type(json_file), intent(inout) :: json
-        character(256) :: buffer(3)
-
-        buffer(1) = parallel_settings
-        buffer(2) = threads
-
-        buffer(3) = is_parallel
-        call get_json_value(json, join(buffer(1:3)), self%solver_settings%parallel_settings%threads%is_parallel, &
-                            is_required=.true., default_value=.false.)
-
-        if (self%solver_settings%parallel_settings%threads%is_parallel) then
-
-            buffer(3) = num_threads
-            call get_json_value(json, join(buffer(1:3)), self%solver_settings%parallel_settings%threads%num_threads, &
-                                is_required=.true., valid_range=[1, huge(1)])
-
-            ! Cap the number of threads to the maximum available if OpenMP is used
-            if (self%solver_settings%parallel_settings%threads%num_threads > omp_get_max_threads()) then
-                call global_logger%log_warning( &
-                    message="Number of threads exceeds available threads. Using maximum available threads.")
-                self%solver_settings%parallel_settings%threads%num_threads = omp_get_max_threads()
-            end if
-
-            buffer(3) = schedule
-            call get_json_value(json, join(buffer(1:3)), self%solver_settings%parallel_settings%threads%schedule, &
-                                is_required=.true., default_value=SCHEDULE_TYPE_STATIC, valid_list=valid_schedule_types)
-
-            buffer(3) = max_active_levels
-            call get_json_value(json, join(buffer(1:3)), self%solver_settings%parallel_settings%threads%max_active_levels, &
-                                is_required=.true., default_value=1, valid_range=[1, huge(1)])
-        end if
-    end subroutine read_solver_parallel_settings
-
     !======================================================================
     ! Private Helper Functions for Display Routines
     !======================================================================
@@ -421,7 +376,6 @@ contains
 
         call display_solver_settings_nonlinear(self%nonlinear_solver)
         call display_solver_settings_linear(self%linear_solver)
-        call display_solver_settings_parallel(self%parallel_settings)
 
         write (*, '(a)') "======================================================================"
     end subroutine display_parameters_solver_settings
@@ -485,19 +439,5 @@ contains
         write (*, '(/a)') "  --- Linear Solver ---"
 
     end subroutine display_solver_settings_linear
-
-    subroutine display_solver_settings_parallel(parallel)
-        !> Displays parallel processing settings.
-        implicit none
-        type(type_parallel_settings), intent(in) :: parallel
-
-        write (*, '(/a)') "  --- Parallel Settings ---"
-        write (*, '(a, L1)') "    Use Parallel          : ", parallel%threads%is_parallel
-        if (parallel%threads%is_parallel) then
-            write (*, '(a, i0)') "    Num Threads           : ", parallel%threads%num_threads
-            write (*, '(a, a)') "    Schedule              : ", trim(parallel%threads%schedule)
-            write (*, '(a, i0)') "    Max Active Levels     : ", parallel%threads%max_active_levels
-        end if
-    end subroutine display_solver_settings_parallel
 
 end submodule input_basic_solver_settings

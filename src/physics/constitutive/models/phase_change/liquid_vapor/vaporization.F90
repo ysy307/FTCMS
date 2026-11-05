@@ -11,7 +11,8 @@ module models_phase_change_vaporization
         Rg => universal_gas_constant, &
         Mw => molar_mass_water, &
         rho_std => reference_water_density, &
-        P_atm => standard_atmospheric_pressure
+        P_atm => standard_atmospheric_pressure, &
+        water_triple_point_temperature, water_critical_point_temperature
     use :: physics_constitutive_base, only:abst_constitutive
 
     implicit none
@@ -47,19 +48,33 @@ contains
         self%initialized = .true.
     end subroutine initialize_evaporation_model
 
-    subroutine calc_latent_heat_vaporization(self, temperature, latent_heat)
+    subroutine calc_latent_heat_vaporization(self, temperature, latent_heat, dlatent_heat_dT)
         implicit none
         class(type_evaporation), intent(in) :: self
         real(real64), intent(in) :: temperature
         real(real64), intent(inout) :: latent_heat
+        !> \(\mathrm{d}L_v/\mathrm{d}T\) along the saturation line, J/(kg K); overwritten on exit when present
+        real(real64), intent(inout), optional :: dlatent_heat_dT
 
         real(real64) :: temperature_K
 
         if (associated(self%water)) then
             call self%shift_temperature_absolute(temperature, temperature_K)
-            call self%water%calc_latent_heat(latent_heat, temperature_K)
+            ! The saturation line of IAPWS-97 runs from the triple to the
+            ! critical point; outside it the latent heat is held at the bound,
+            ! as every other saturated-vapour property of the closure is.
+            if (temperature_K < water_triple_point_temperature .or. &
+                temperature_K > water_critical_point_temperature) then
+                temperature_K = min(max(temperature_K, water_triple_point_temperature), water_critical_point_temperature)
+                call self%calc_latent_heat_saturation(temperature_K, latent_heat)
+                if (present(dlatent_heat_dT)) dlatent_heat_dT = 0.0d0
+            else
+                call self%calc_latent_heat_saturation(temperature_K, latent_heat)
+                if (present(dlatent_heat_dT)) call self%calc_dlatent_heat_saturation_dT(temperature_K, dlatent_heat_dT)
+            end if
         else
             latent_heat = 2.501d6 - 2369.2d0 * temperature
+            if (present(dlatent_heat_dT)) dlatent_heat_dT = -2369.2d0
         end if
     end subroutine calc_latent_heat_vaporization
 

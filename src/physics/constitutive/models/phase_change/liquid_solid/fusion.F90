@@ -6,7 +6,7 @@ module models_phase_change_fusion
         Tf0 => water_freezing_point_at_standard_atmospheric_pressure, &
         g => gravity_acceleration, rho_std => reference_water_density, &
         Lf0 => latent_heat_fusion_water_0C, &
-        TtoK => celsius_to_kelvin
+        TtoK => celsius_to_kelvin, tangent_pressure, tangent_temperature
     use :: physics_constitutive_base, only:abst_constitutive
     use :: models_wrf, only:abst_wrf
     use :: models_phase_change_gcc, only:abst_gcc
@@ -145,12 +145,13 @@ contains
                 real(real64) :: alpha_pk, rho_w_pk, rho_i_pk, pressure_pk
                 real(real64) :: ds_dP_pk, ds_dT_pk, s_raw_pk
                 real(real64) :: drw_dP, drw_dT, dri_dP, dri_dT
-                real(real64) :: dalpha_dT
+                real(real64) :: dalpha_dP, dalpha_dT
 
                 call self%calc_rho_water(state, rho_w_pk)
                 call self%calc_rho_ice(state, rho_i_pk)
                 alpha_pk = 1.0d0
 
+                dalpha_dP = 0.0d0
                 dalpha_dT = 0.0d0
                 if (rho_w_pk > tiny(1.0d0)) then
                     alpha_pk = rho_i_pk / rho_w_pk
@@ -158,6 +159,7 @@ contains
                     call self%calc_drho_water_dT(state, drw_dT)
                     call self%calc_drho_ice_dP(state, dri_dP)
                     call self%calc_drho_ice_dT(state, dri_dT)
+                    dalpha_dP = dri_dP / rho_w_pk - rho_i_pk * drw_dP / rho_w_pk**2
                     dalpha_dT = dri_dT / rho_w_pk - rho_i_pk * drw_dT / rho_w_pk**2
                 end if
                 call state%pressure%get(pressure_pk)
@@ -169,19 +171,12 @@ contains
                 s_raw_pk = suction_freezing
 
                 ! chi = (alpha-1)p_w + alpha*s_f. alpha is a state function, so
-                ! its own derivative multiplies (p_w + s_f); dropping it in T
-                ! costs 1.5e-4 relative against the finite difference.
-                !
-                ! The pressure derivative deliberately omits the matching
-                ! dalpha/dp term: the freezing model declares d(s_f)/dp = 0,
-                ! discarding the rho_w(p) dependence it would otherwise carry,
-                ! and the two omissions cancel. Measured, keeping only
-                ! dalpha/dp breaks that cancellation and the pressure
-                ! derivatives stop matching their finite differences.
+                ! its own derivative multiplies (p_w + s_f) in both unknowns;
+                ! the freezing model's d(s_f)/dp carries its rho_w(p) dependence.
                 suction_freezing = SURFACE_TENSION_RATIO * &
                                    ((alpha_pk - 1.0d0) * pressure_pk + alpha_pk * s_raw_pk)
                 if (present(dfreezing_dP)) dfreezing_dP = SURFACE_TENSION_RATIO * &
-                    ((alpha_pk - 1.0d0) + alpha_pk * ds_dP_pk)
+                    ((alpha_pk - 1.0d0) + alpha_pk * ds_dP_pk + dalpha_dP * (pressure_pk + s_raw_pk))
                 if (present(dfreezing_dT)) dfreezing_dT = SURFACE_TENSION_RATIO * &
                     (alpha_pk * ds_dT_pk + dalpha_dT * (pressure_pk + s_raw_pk))
             end block
@@ -1160,9 +1155,17 @@ contains
         call calc_freezing_suction(self, state, psi_cryo, &
                                    dfreezing_dP=d_psi_cryo_dP, dfreezing_dT=d_psi_cryo_dT)
 
-        call compute_effective_suction(psi_cap, psi_cryo, psi_eff, d_psi_eff_dpsi_cap, d_psi_eff_dpsi_cryo)
-        d_psi_eff_dP = d_psi_eff_dpsi_cap * d_psi_cap_dP + d_psi_eff_dpsi_cryo * d_psi_cryo_dP
-        d_psi_eff_dT = d_psi_eff_dpsi_cryo * d_psi_cryo_dT
+        if (pressure < 0.0d0) then
+            ! The pore-volume-limited suction calc_water_content composes, with
+            ! its own tangents: their convention d(psi_cap)/dp = -1 is the
+            ! unclamped branch, so they are exact here, including the limit root.
+            call compute_pore_limited_effective_suction(self, state, psi_cap, psi_cryo, d_psi_cryo_dP, d_psi_cryo_dT, &
+                                                        psi_eff, d_psi_eff_dP, d_psi_eff_dT)
+        else
+            call compute_effective_suction(psi_cap, psi_cryo, psi_eff, d_psi_eff_dpsi_cap, d_psi_eff_dpsi_cryo)
+            d_psi_eff_dP = d_psi_eff_dpsi_cap * d_psi_cap_dP + d_psi_eff_dpsi_cryo * d_psi_cryo_dP
+            d_psi_eff_dT = d_psi_eff_dpsi_cryo * d_psi_cryo_dT
+        end if
 
         call self%wrf%deriv(-psi_eff / (rho_std * g), d_theta_liquid_dPress)
 
@@ -1557,12 +1560,15 @@ contains
     !> Numerical guarantee: returns a bracketed bisection solution when a transition exists.
     !> Computational complexity: \(O(N_b)\) arithmetic and \(O(1)\) memory.
     !> Failure behavior: reports an unsaturated state when no finite transition is bracketed.
-    subroutine calc_saturation_pressure(self, state, saturation_pressure, is_saturated)
+    subroutine calc_saturation_pressure(self, state, saturation_pressure, is_saturated, tangent)
         implicit none
         class(type_fusion), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: saturation_pressure
         logical, intent(inout) :: is_saturated
+        !> \((\partial p_{sat}/\partial p_w,\partial p_{sat}/\partial T)\) at this state's phase split,
+        !> zero when the pore is not saturated; overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
         integer(int32), parameter :: max_bisection_iterations = 64
         real(real64), parameter :: pressure_floor = -1.0d12
@@ -1571,10 +1577,12 @@ contains
         real(real64) :: pressure_low, pressure_high, pressure_mid
         real(real64) :: volume_current, volume_low, volume_high, volume_mid
         real(real64) :: volume_tolerance
+        real(real64) :: dliquid_dP, dliquid_dT, dice_dP, dice_dT
         integer(int32) :: i
 
         saturation_pressure = 0.0d0
         is_saturated = .false.
+        if (present(tangent)) tangent(:) = 0.0d0
         call state%pressure%get(pressure)
         call state%porosity%get(porosity)
         call state%ice_content%get(ice_content)
@@ -1610,6 +1618,24 @@ contains
         saturation_pressure = 0.5d0 * (pressure_low + pressure_high)
         is_saturated = pressure >= saturation_pressure - &
                        max(1.0d-8 * max(abs(saturation_pressure), 1.0d0), epsilon(1.0d0))
+
+        if (present(tangent) .and. is_saturated) then
+            ! The root solves theta_l(p_sat, T) + theta_i(p_w, T) = phi with the
+            ! ice of this state's split, so the implicit function theorem gives
+            ! d(p_sat) = -(d(theta_l)/dT dT + d(theta_i)) / (d(theta_l)/dp).
+            ! The bisection bounds keep p_sat < 0, where calc_water_content_derivatives
+            ! is the exact derivative of calc_water_content.
+            call local_state%pressure%set(saturation_pressure)
+            call self%calc_water_content_derivatives(local_state, dliquid_dP, dliquid_dT)
+            call state%dQi_dP%get(dice_dP)
+            call state%dQi_dT%get(dice_dT)
+            ! A root where theta_l is flat in p is not one the bisection can
+            ! bracket, short of a change of sign exactly at a kink.
+            if (abs(dliquid_dP) > tiny(1.0d0)) then
+                tangent(tangent_pressure) = -dice_dP / dliquid_dP
+                tangent(tangent_temperature) = -(dliquid_dT + dice_dT) / dliquid_dP
+            end if
+        end if
 
     contains
         subroutine evaluate_unconstrained_phase_volume(candidate_state, candidate_pressure, phase_volume)

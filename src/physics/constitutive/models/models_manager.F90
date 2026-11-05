@@ -126,13 +126,15 @@ contains
         call self%phase_manager%solve_local_conserved_equilibrium(state, target_total_water, new_pressure, new_ice, converged)
     end subroutine solve_local_conserved_equilibrium
 
-    subroutine calc_Kflh(self, state, Kflh)
+    subroutine calc_Kflh(self, state, Kflh, log_tangent)
         implicit none
         class(type_models_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: Kflh
+        !> \((\partial\ln K/\partial p_w,\partial\ln K/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        call self%hcf%p%calc_Kflh(state, Kflh)
+        call self%hcf%p%calc_Kflh(state, Kflh, log_tangent)
     end subroutine calc_Kflh
 
     !> Thermal liquid conductivity from the surface-tension relation.
@@ -197,23 +199,27 @@ contains
         call self%phase_manager%calc_latent_heat_fusion(state, L_fusion)
     end subroutine calc_latent_heat_fusion
 
-    subroutine calc_latent_heat_vaporization(self, state, L_vaporization)
+    subroutine calc_latent_heat_vaporization(self, state, L_vaporization, tangent)
         implicit none
         class(type_models_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: L_vaporization
+        !> \((\partial L_v/\partial p_w,\partial L_v/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
-        call self%phase_manager%calc_latent_heat_vaporization(state, L_vaporization)
+        call self%phase_manager%calc_latent_heat_vaporization(state, L_vaporization, tangent)
     end subroutine calc_latent_heat_vaporization
 
-    subroutine calc_saturation_pressure(self, state, saturation_pressure, is_saturated)
+    subroutine calc_saturation_pressure(self, state, saturation_pressure, is_saturated, tangent)
         implicit none
         class(type_models_manager), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: saturation_pressure
         logical, intent(inout) :: is_saturated
+        !> \((\partial p_{sat}/\partial p_w,\partial p_{sat}/\partial T)\); overwritten on exit when present
+        real(real64), intent(inout), optional :: tangent(2)
 
-        call self%phase_manager%calc_saturation_pressure(state, saturation_pressure, is_saturated)
+        call self%phase_manager%calc_saturation_pressure(state, saturation_pressure, is_saturated, tangent)
     end subroutine calc_saturation_pressure
 
     subroutine calc_pressure_ice_water_derivative(self, state, deriv)

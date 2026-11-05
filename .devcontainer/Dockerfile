@@ -64,7 +64,7 @@ RUN echo 'export NVARCH=$(uname -s)_$(uname -m)' > /etc/profile.d/nvhpc.sh && \
 # --- 5. Install Python tools ---
 RUN pip3 install --upgrade pip && \
     pip3 install --force-reinstall git+https://github.com/fortran-lang/fortls && \
-    pip3 install --upgrade fprettify fypp ford
+    pip3 install --upgrade fprettify fypp ford sympy
 
 # --- 6. Create regular user ---
 RUN groupadd --gid ${USER_GID} ${USERNAME} && \

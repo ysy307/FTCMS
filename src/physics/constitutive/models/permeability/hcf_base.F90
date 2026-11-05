@@ -1,5 +1,7 @@
 submodule(models_hcf) hcf_base
     use, intrinsic :: iso_fortran_env
+    use :: constitutive_constants, only:tangent_pressure, tangent_temperature
+    use :: constitutive_laws, only:evaluate_ice_impedance_ratio, evaluate_ice_impedance_ratio_tangent
     implicit none
     real(real64), parameter :: gamma_0 = 71.88875d0 ! g/s^2
 contains
@@ -12,11 +14,12 @@ contains
     !> as a multiplicative factor by the configured HCF model. Falls back to the
     !> pore-water head when psi_eff is not set on the state (isothermal callers
     !> that never populate effective_suction).
-    module subroutine calc_head_hcf(self, state, head)
+    module subroutine calc_head_hcf(self, state, head, tangent)
         implicit none
         class(abst_hcf), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: head
+        real(real64), intent(inout), optional :: tangent(2)
 
         real(real64) :: psi_eff, pressure
         logical :: is_set
@@ -26,9 +29,19 @@ contains
         call state%effective_suction%get(psi_eff, is_set)
         if (is_set) then
             head = -psi_eff / (rho_std * g)
+            if (present(tangent)) then
+                ! The split that set psi_eff published its tangents with it.
+                call state%dSeff_dP%get(tangent(tangent_pressure))
+                call state%dSeff_dT%get(tangent(tangent_temperature))
+                tangent(:) = -tangent(:) / (rho_std * g)
+            end if
         else
             call state%pressure%get(pressure)
             head = pressure / (rho_std * g)
+            if (present(tangent)) then
+                tangent(tangent_pressure) = 1.0d0 / (rho_std * g)
+                tangent(tangent_temperature) = 0.0d0
+            end if
         end if
     end subroutine calc_head_hcf
 
@@ -38,23 +51,100 @@ contains
     !> with \(\Omega = 7\) was calibrated against the Mizoguchi columns using
     !> THIS definition; passing the raw volumetric ice content instead changes
     !> the meaning (and effective strength) of the calibrated factor.
-    module subroutine calc_impedance_ratio_hcf(self, state, ratio)
+    module subroutine calc_impedance_ratio_hcf(self, state, ratio, tangent)
         implicit none
         class(abst_hcf), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: ratio
+        real(real64), intent(inout), optional :: tangent(2)
 
         real(real64) :: Qw, Qi, denom
+        real(real64) :: dQw(2), dQi(2)
 
         call state%water_content%get(Qw)
         call state%ice_content%get(Qi)
+        if (present(tangent)) tangent(:) = 0.0d0
         denom = Qw + Qi - self%config%theta_r
-        if (denom > tiny(1.0d0) .and. Qi > 0.0d0) then
-            ratio = min(Qi / denom, 1.0d0)
-        else
+        if (.not. (denom > tiny(1.0d0) .and. Qi > 0.0d0)) then
             ratio = 0.0d0
+            return
+        end if
+
+        if (present(tangent)) then
+            call state%dQw_dP%get(dQw(tangent_pressure))
+            call state%dQw_dT%get(dQw(tangent_temperature))
+            call state%dQi_dP%get(dQi(tangent_pressure))
+            call state%dQi_dT%get(dQi(tangent_temperature))
+            call evaluate_ice_impedance_ratio_tangent(self%config%theta_r, Qw, dQw, Qi, dQi, ratio, tangent)
+        else
+            call evaluate_ice_impedance_ratio(self%config%theta_r, Qw, Qi, ratio)
+        end if
+        ! The cap is a branch of its own, constant in both unknowns.
+        if (ratio > 1.0d0) then
+            ratio = 1.0d0
+            if (present(tangent)) tangent(:) = 0.0d0
         end if
     end subroutine calc_impedance_ratio_hcf
+
+    module subroutine apply_base_factor_hcf(self, state, kflh, log_tangent)
+        implicit none
+        class(abst_hcf), intent(in) :: self
+        type(type_state), intent(in) :: state
+        real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
+
+        real(real64) :: head, dhead(2), kr_base, dkr_dh
+
+        if (present(log_tangent)) then
+            call self%calc_head(state, head, dhead)
+            call self%base%calc_kr(head, kr_base, dkr_dh)
+            ! A vanishing k_r has no logarithm; the conductivity it gives is refused downstream.
+            if (kr_base > 0.0d0) log_tangent(:) = log_tangent(:) + (dkr_dh / kr_base) * dhead(:)
+        else
+            call self%calc_head(state, head)
+            call self%base%calc_kr(head, kr_base)
+        end if
+        kflh = kflh * kr_base
+    end subroutine apply_base_factor_hcf
+
+    module subroutine apply_impedance_factor_hcf(self, state, kflh, log_tangent)
+        implicit none
+        class(abst_hcf), intent(in) :: self
+        type(type_state), intent(in) :: state
+        real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
+
+        real(real64) :: Q_ratio, dQ_ratio(2), kr_impedance, dkr_dQ
+
+        if (present(log_tangent)) then
+            call self%calc_impedance_ratio(state, Q_ratio, dQ_ratio)
+            call self%impedance%calc_impedance(Q_ratio, kr_impedance, dkr_dQ)
+            log_tangent(:) = log_tangent(:) + (dkr_dQ / kr_impedance) * dQ_ratio(:)
+        else
+            call self%calc_impedance_ratio(state, Q_ratio)
+            call self%impedance%calc_impedance(Q_ratio, kr_impedance)
+        end if
+        kflh = kflh * kr_impedance
+    end subroutine apply_impedance_factor_hcf
+
+    module subroutine apply_viscosity_factor_hcf(self, state, kflh, log_tangent)
+        implicit none
+        class(abst_hcf), intent(in) :: self
+        type(type_state), intent(in) :: state
+        real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
+
+        real(real64) :: temperature, kr_viscosity, dkr_dT
+
+        call state%temperature%get(temperature)
+        if (present(log_tangent)) then
+            call self%viscosity%calc_viscosity(temperature, kr_viscosity, dkr_dT)
+            log_tangent(tangent_temperature) = log_tangent(tangent_temperature) + dkr_dT / kr_viscosity
+        else
+            call self%viscosity%calc_viscosity(temperature, kr_viscosity)
+        end if
+        kflh = kflh * kr_viscosity
+    end subroutine apply_viscosity_factor_hcf
 
     module subroutine initialize_holder_hcfs(self, config, water, ice)
         implicit none
@@ -174,125 +264,99 @@ contains
         initialized = self%initialized
     end function is_initialized_hcf
 
-    module subroutine calc_kflh_base(self, state, kflh)
+    module subroutine calc_kflh_base(self, state, kflh, log_tangent)
         implicit none
         class(type_hcf_base), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        real(real64) :: kr_base
-        real(real64) :: head
-
-        call self%calc_head(state, head)
-
-        call self%base%calc_kr(head, kr_base)
-        kflh = self%config%k_sat * kr_base
+        kflh = self%config%k_sat
+        if (present(log_tangent)) log_tangent(:) = 0.0d0
+        call self%apply_base_factor(state, kflh, log_tangent)
 
     end subroutine calc_kflh_base
 
-    module subroutine calc_kflh_impedance(self, state, kflh)
+    module subroutine calc_kflh_impedance(self, state, kflh, log_tangent)
         implicit none
         class(type_hcf_impedance), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        real(real64) :: kr_impedance
-        real(real64) :: Q_ratio
-
-        call self%calc_impedance_ratio(state, Q_ratio)
-
-        call self%impedance%calc_impedance(Q_ratio, kr_impedance)
-        kflh = self%config%k_sat * kr_impedance
+        kflh = self%config%k_sat
+        if (present(log_tangent)) log_tangent(:) = 0.0d0
+        call self%apply_impedance_factor(state, kflh, log_tangent)
 
     end subroutine calc_kflh_impedance
 
-    module subroutine calc_kflh_viscosity(self, state, kflh)
+    module subroutine calc_kflh_viscosity(self, state, kflh, log_tangent)
         implicit none
         class(type_hcf_viscosity), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        real(real64) :: kr_viscosity
-        real(real64) :: temperature
-
-        call state%temperature%get(temperature)
-
-        call self%viscosity%calc_viscosity(temperature, kr_viscosity)
-        kflh = self%config%k_sat * kr_viscosity
+        kflh = self%config%k_sat
+        if (present(log_tangent)) log_tangent(:) = 0.0d0
+        call self%apply_viscosity_factor(state, kflh, log_tangent)
 
     end subroutine calc_kflh_viscosity
 
-    module subroutine calc_kflh_base_impedance(self, state, kflh)
+    module subroutine calc_kflh_base_impedance(self, state, kflh, log_tangent)
         implicit none
         class(type_hcf_base_impedance), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        real(real64) :: kr_base, kr_impedance
-        real(real64) :: head, Q_ratio
-
-        call self%calc_head(state, head)
-        call self%calc_impedance_ratio(state, Q_ratio)
-
-        call self%base%calc_kr(head, kr_base)
-        call self%impedance%calc_impedance(Q_ratio, kr_impedance)
-        kflh = self%config%k_sat * kr_base * kr_impedance
+        kflh = self%config%k_sat
+        if (present(log_tangent)) log_tangent(:) = 0.0d0
+        call self%apply_base_factor(state, kflh, log_tangent)
+        call self%apply_impedance_factor(state, kflh, log_tangent)
 
     end subroutine calc_kflh_base_impedance
 
-    module subroutine calc_kflh_base_viscosity(self, state, kflh)
+    module subroutine calc_kflh_base_viscosity(self, state, kflh, log_tangent)
         implicit none
         class(type_hcf_base_viscosity), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        real(real64) :: kr_base, kr_viscosity
-        real(real64) :: temperature, head
-
-        call state%temperature%get(temperature)
-        call self%calc_head(state, head)
-
-        call self%base%calc_kr(head, kr_base)
-        call self%viscosity%calc_viscosity(temperature, kr_viscosity)
-        kflh = self%config%k_sat * kr_base * kr_viscosity
+        kflh = self%config%k_sat
+        if (present(log_tangent)) log_tangent(:) = 0.0d0
+        call self%apply_base_factor(state, kflh, log_tangent)
+        call self%apply_viscosity_factor(state, kflh, log_tangent)
 
     end subroutine calc_kflh_base_viscosity
 
-    module subroutine calc_kflh_impedance_viscosity(self, state, kflh)
+    module subroutine calc_kflh_impedance_viscosity(self, state, kflh, log_tangent)
         implicit none
         class(type_hcf_impedance_viscosity), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        real(real64) :: kr_impedance, kr_viscosity
-        real(real64) :: temperature, Q_ratio
-
-        call state%temperature%get(temperature)
-        call self%calc_impedance_ratio(state, Q_ratio)
-
-        call self%impedance%calc_impedance(Q_ratio, kr_impedance)
-        call self%viscosity%calc_viscosity(temperature, kr_viscosity)
-        kflh = self%config%k_sat * kr_impedance * kr_viscosity
+        kflh = self%config%k_sat
+        if (present(log_tangent)) log_tangent(:) = 0.0d0
+        call self%apply_impedance_factor(state, kflh, log_tangent)
+        call self%apply_viscosity_factor(state, kflh, log_tangent)
 
     end subroutine calc_kflh_impedance_viscosity
 
-    module subroutine calc_kflh_base_impedance_viscosity(self, state, kflh)
+    module subroutine calc_kflh_base_impedance_viscosity(self, state, kflh, log_tangent)
         implicit none
         class(type_hcf_base_impedance_viscosity), intent(in) :: self
         type(type_state), intent(in) :: state
         real(real64), intent(inout) :: kflh
+        real(real64), intent(inout), optional :: log_tangent(2)
 
-        real(real64) :: kr_base, kr_impedance, kr_viscosity
-        real(real64) :: temperature, head, Q_ratio
-
-        call state%temperature%get(temperature)
-        call self%calc_impedance_ratio(state, Q_ratio)
-        call self%calc_head(state, head)
-
-        call self%base%calc_kr(head, kr_base)
-        call self%impedance%calc_impedance(Q_ratio, kr_impedance)
-        call self%viscosity%calc_viscosity(temperature, kr_viscosity)
-        kflh = self%config%k_sat * kr_base * kr_impedance * kr_viscosity
+        kflh = self%config%k_sat
+        if (present(log_tangent)) log_tangent(:) = 0.0d0
+        call self%apply_base_factor(state, kflh, log_tangent)
+        call self%apply_impedance_factor(state, kflh, log_tangent)
+        call self%apply_viscosity_factor(state, kflh, log_tangent)
 
     end subroutine calc_kflh_base_impedance_viscosity
 

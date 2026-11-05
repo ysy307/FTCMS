@@ -1,10 +1,10 @@
 """Reader equivalence and failure tests for the Mizoguchi validation scripts.
 
-Two output layouts have to be measured with one instrument: the archived runs
-wrote one ``Out_NNN.vtu`` per output step, the current PetscDS path writes a
-single time-indexed ``PlexFEM.h5``. Every accuracy number in this project is
-only comparable across those two if the *reader* is the only thing that differs
-and every downstream step -- resampling, depth binning, metrics -- is shared.
+Two output layouts have to be measured with one instrument: one ``Out_NNN.vtu``
+per output step, or one ``Out_NNN.h5`` per step in PETSc's visualisation layout
+(`file_format: hdf5`). Every accuracy number in this project is only comparable
+across those two if the *reader* is the only thing that differs and every
+downstream step -- resampling, depth binning, metrics -- is shared.
 
 These tests therefore assert two things:
 
@@ -88,22 +88,21 @@ def _write_vtu(directory, points, cells, snapshots, *, stem="Out", fields=True):
     return written
 
 
-def _write_hdf5(path, points, cells, snapshots, *, fields=("WaterContent", "IceContent")):
-    """Write the single time-indexed HDF5 the PetscDS path produces."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    order = sorted(snapshots)
-    water = np.asarray([snapshots[i][0] for i in order])
-    ice = np.asarray([snapshots[i][1] for i in order])
-    with h5py.File(path, "w") as handle:
-        handle.create_dataset("geometry/vertices", data=points)
-        dataset = handle.create_dataset("viz/topology/cells", data=cells.astype(np.int32))
-        dataset.attrs["cell_corners"] = np.int32(cells.shape[1])
-        dataset.attrs["cell_dim"] = np.int32(2)
-        if "WaterContent" in fields:
-            handle.create_dataset("fields/WaterContent", data=water)
-        if "IceContent" in fields:
-            handle.create_dataset("fields/IceContent", data=ice)
-    return path
+def _write_hdf5(directory, points, cells, snapshots, *, fields=("water_content", "ice_content")):
+    """Write one Out_NNN.h5 per snapshot, in the layout FTCMS writes through PETSc."""
+    directory.mkdir(parents=True, exist_ok=True)
+    written = []
+    for index, (water, ice) in snapshots.items():
+        path = directory / f"Out_{index:03d}.h5"
+        with h5py.File(path, "w") as handle:
+            handle.create_dataset("geometry/vertices", data=points)
+            handle.create_dataset("viz/topology/cells", data=cells.astype(np.int32))
+            if "water_content" in fields:
+                handle.create_dataset("vertex_fields/fields_water_content", data=water)
+            if "ice_content" in fields:
+                handle.create_dataset("vertex_fields/fields_ice_content", data=ice)
+        written.append(path)
+    return written
 
 
 class ReaderEquivalenceTest(unittest.TestCase):
@@ -120,7 +119,7 @@ class ReaderEquivalenceTest(unittest.TestCase):
         cls.vtu_dir = root / "vtu" / "Files"
         _write_vtu(cls.vtu_dir, points, cells, snapshots)
         cls.h5_dir = root / "h5" / "Files"
-        _write_hdf5(cls.h5_dir / "PlexFEM.h5", points, cells, snapshots)
+        _write_hdf5(cls.h5_dir, points, cells, snapshots)
 
     @classmethod
     def tearDownClass(cls):
@@ -138,7 +137,7 @@ class ReaderEquivalenceTest(unittest.TestCase):
 
     def test_depth_profiles_are_identical(self):
         vtu_rows = self._profile(self.vtu_dir, "vtu", 24, 24)
-        h5_rows = self._profile(self.h5_dir, "hdf5", 1, 24)
+        h5_rows = self._profile(self.h5_dir, "hdf5", 24, 24)
         self.assertEqual(len(vtu_rows), len(h5_rows))
         for a, b in zip(vtu_rows, h5_rows):
             self.assertIsNotNone(a["simulated"])
@@ -147,7 +146,7 @@ class ReaderEquivalenceTest(unittest.TestCase):
 
     def test_profile_metrics_are_identical(self):
         vtu = mt._profile_metrics(self._profile(self.vtu_dir, "vtu", 24, 24))
-        h5 = mt._profile_metrics(self._profile(self.h5_dir, "hdf5", 1, 24))
+        h5 = mt._profile_metrics(self._profile(self.h5_dir, "hdf5", 24, 24))
         for key in ("rmse", "mae", "bias", "max_abs_error"):
             self.assertAlmostEqual(vtu[key], h5[key], places=12, msg=key)
 
@@ -198,7 +197,7 @@ class SelectionFailureTest(unittest.TestCase):
     def test_both_formats_present_is_ambiguous(self):
         both = self.root / "both" / "Files"
         _write_vtu(both, self.points, self.cells, self.snapshots)
-        _write_hdf5(both / "PlexFEM.h5", self.points, self.cells, self.snapshots)
+        _write_hdf5(both, self.points, self.cells, self.snapshots)
         with self.assertRaises(mt.SnapshotError) as raised:
             mt.resolve_snapshot_source(both, "auto")
         self.assertIn("--snapshot_format", str(raised.exception))
@@ -212,12 +211,12 @@ class SelectionFailureTest(unittest.TestCase):
         with self.assertRaises(mt.SnapshotError):
             mt.resolve_snapshot_source(vtu_only, "hdf5")
 
-    def test_more_than_one_hdf5_is_a_failure(self):
-        many = self.root / "many" / "Files"
-        _write_hdf5(many / "PlexFEM.h5", self.points, self.cells, self.snapshots)
-        _write_hdf5(many / "Other.h5", self.points, self.cells, self.snapshots)
+    def test_duplicate_hdf5_indices_are_ambiguous(self):
+        directory = self.root / "duplicates_h5"
+        _write_hdf5(directory, self.points, self.cells, self.snapshots)
+        _write_hdf5(directory / "Files", self.points, self.cells, self.snapshots)
         with self.assertRaises(mt.SnapshotError):
-            mt.resolve_snapshot_source(many, "hdf5")
+            mt.resolve_snapshot_source(directory, "hdf5")
 
 
 class SnapshotAvailabilityTest(unittest.TestCase):
@@ -243,7 +242,7 @@ class SnapshotAvailabilityTest(unittest.TestCase):
 
     def test_hdf5_missing_index_reports_what_exists(self):
         directory = self.root / "h5" / "Files"
-        _write_hdf5(directory / "PlexFEM.h5", self.points, self.cells, self.snapshots)
+        _write_hdf5(directory, self.points, self.cells, self.snapshots)
         source = mt.resolve_snapshot_source(directory, "hdf5")
         with self.assertRaises(mt.SnapshotError) as raised:
             source.read_grid(24)
@@ -258,13 +257,7 @@ class SnapshotAvailabilityTest(unittest.TestCase):
 
     def test_hdf5_without_ice_content_is_a_failure(self):
         directory = self.root / "partial" / "Files"
-        _write_hdf5(
-            directory / "PlexFEM.h5",
-            self.points,
-            self.cells,
-            self.snapshots,
-            fields=("WaterContent",),
-        )
+        _write_hdf5(directory, self.points, self.cells, self.snapshots, fields=("water_content",))
         source = mt.resolve_snapshot_source(directory, "hdf5")
         with self.assertRaises((mt.SnapshotError, ValueError)):
             source.read_grid(0)

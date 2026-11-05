@@ -693,6 +693,34 @@
     }
     
 
+    #:set FE_SPACES = { &
+        'type_name'  : 'type_fe_spaces', &
+        'obj_name'   : 'FE_SPACES', &
+        'category'   : 'FE_SPACE', &
+        'suffix'     : 'fe_space', &
+        'description': 'Finite element spaces a governing equation is discretised in', &
+        'items'      : [ &
+            ('LAGRANGE', 1, 'lagrange'), &
+            ('MIXED',    2, 'mixed') &
+        ], &
+        'num' : 2, &
+        'id_range' : [1, 2] &
+    }
+
+    #:set COEFFICIENT_EVALUATIONS = { &
+        'type_name'  : 'type_coefficient_evaluations', &
+        'obj_name'   : 'COEFFICIENT_EVALUATIONS', &
+        'category'   : 'COEFFICIENT_EVALUATION', &
+        'suffix'     : 'coefficient_evaluation', &
+        'description': 'Where the constitutive laws of a governing equation are evaluated', &
+        'items'      : [ &
+            ('QUADRATURE', 1, 'quadrature'), &
+            ('NODAL',      2, 'nodal') &
+        ], &
+        'num' : 2, &
+        'id_range' : [1, 2] &
+    }
+
     #:set constant_id_groups = [ &
         MATRIX_TYPES, &
         COUPLING_MODES, &
@@ -731,7 +759,9 @@
         VECTOR_NORM_CRITERIA, &
         CONSTITUTIVE_PROPERTIES, &
         PROFILER_TYPES, &
-        BC_DATA_PROVIDER_TYPES &
+        BC_DATA_PROVIDER_TYPES, &
+        FE_SPACES, &
+        COEFFICIENT_EVALUATIONS &
     ]
 
 

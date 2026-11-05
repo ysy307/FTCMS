@@ -7,6 +7,12 @@ module constitutive_constants
     public :: reference_water_density
     public :: gravity_acceleration
 
+    !> Position of the pore pressure \(p_w\) in a tangent of the state unknowns
+    !> \((p_w,T)\), the order every `tangent(2)` argument of the models uses.
+    integer(int32), parameter, public :: tangent_pressure = 1
+    !> Position of the temperature \(T\) in the same tangent.
+    integer(int32), parameter, public :: tangent_temperature = 2
+
     !> Mathematical constant pi
     real(real64), parameter, public :: circle_ratio = 3.141592653589793d0
 
