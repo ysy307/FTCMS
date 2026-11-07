@@ -10,8 +10,9 @@ here, so FTCMS alone runs it:
   surface freezes);
 * the base condition: `leak` (the room behind a resistance) or `measured`
   (the measured 20 cm temperatures);
-* the discretisation of the water equation, the ice impedance factor and the
-  mesh (the project's own, a given file, or a structured rectangle).
+* the discretisation of the water equation, the ice impedance factor, whether
+  the liquid carries sensible heat, and the mesh (the project's own, a given
+  file, or a structured rectangle).
 
 The temperatures are those of docs/data/soil_temperature_profiles.csv; the
 0 h plate value is the intercept of the exponential fitted to the measured ones.
@@ -72,6 +73,7 @@ def write_project(arguments: argparse.Namespace) -> Path:
         "thermal": DISCRETIZATIONS["lagrange"],
         "hydraulic": DISCRETIZATIONS[arguments.hydraulic],
     }
+    basic["analysis_controls"]["enable_heat_advection"] = not arguments.no_heat_advection
     for material in basic["materials"]:
         material["hydraulic_conductivity_model"]["impedance_factor"] = arguments.impedance_factor
     if arguments.mesh is not None:
@@ -117,6 +119,8 @@ def main() -> None:
     parser.add_argument("--base", choices=("leak", "measured"), default="leak")
     parser.add_argument("--hydraulic", choices=sorted(DISCRETIZATIONS), default="mixed")
     parser.add_argument("--impedance-factor", type=float, default=7.0)
+    parser.add_argument("--no-heat-advection", action="store_true",
+                        help="leave the sensible heat of the liquid flux out of the heat equation")
     parser.add_argument("--hours", type=float, default=50.0)
     parser.add_argument("--mesh", type=Path, default=None, help="a Gmsh file to use instead of the project's")
     parser.add_argument("--nx", type=int, default=2)

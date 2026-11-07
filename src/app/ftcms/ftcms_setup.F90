@@ -515,13 +515,20 @@ contains
         p = int(self%pressure_field, c_int)
         cerr = 0
 
-        ! Heat is conducted, and carried by the liquid wherever water moves.
-        if (t >= 0 .and. p < 0) then
+        ! Heat is conducted, and carried by the liquid wherever water moves
+        ! unless the input turns that advection off.
+        if (t >= 0 .and. (p < 0 .or. .not. self%input%basic%analysis_controls%enable_heat_advection)) then
             call petscds_set_residual(ds, t, c_funloc(f0_temperature), c_funloc(f1_temperature), cerr)
             call check(cerr)
             call petscds_set_jacobian(ds, t, t, c_funloc(g0_temperature_temperature), c_null_funptr, &
                                       c_funloc(g2_temperature_temperature), c_funloc(g3_temperature_temperature), cerr)
             call check(cerr)
+            ! Storage and conductivity still depend on the water pressure.
+            if (p >= 0) then
+                call petscds_set_jacobian(ds, t, p, c_funloc(g0_temperature_pressure), c_null_funptr, &
+                                          c_funloc(g2_temperature_pressure), c_null_funptr, cerr)
+                call check(cerr)
+            end if
         else if (t >= 0) then
             call petscds_set_residual(ds, t, c_funloc(f0_temperature_advected), c_funloc(f1_temperature), cerr)
             call check(cerr)

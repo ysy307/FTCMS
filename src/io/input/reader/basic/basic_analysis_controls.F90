@@ -8,6 +8,7 @@ submodule(io_input_basic) input_basic_analysis_controls
     character(*), parameter :: calculate_hydraulic = "calculate_hydraulic"
     character(*), parameter :: calculate_mechanical = "calculate_mechanical"
     character(*), parameter :: enable_vapor_transport = "enable_vapor_transport"
+    character(*), parameter :: enable_heat_advection = "enable_heat_advection"
     character(*), parameter :: coupling_mode = "coupling_mode"
     character(*), parameter :: coupling_modes_strings(2) = [character(len=16) :: "staggered", "monolithic"]
     !!------------------------------------------------------------------------------------------------------------------------------
@@ -35,6 +36,10 @@ contains
         call get_json_value(json, join(buffer), self%analysis_controls%enable_vapor_transport, &
                     is_required=.false., default_value=.true.)
 
+        buffer(2) = enable_heat_advection
+        call get_json_value(json, join(buffer), self%analysis_controls%enable_heat_advection, &
+                            is_required=.false., default_value=.true.)
+
         if (.not. any(self%analysis_controls%is_active(:))) then
             call raise_error(ERROR_CODES%VAR_INVALID, opt=analysis_controls)
         end if
@@ -54,6 +59,7 @@ contains
         write (*, '(a)') "Calculate Hydraulic: "//to_string(self%is_active(PHYSICS_TYPES%HYDRAULIC%ID))
         write (*, '(a)') "Calculate Mechanical: "//to_string(self%is_active(PHYSICS_TYPES%MECHANICAL%ID))
         write (*, '(a)') "Enable Vapor Transport: "//to_string(self%enable_vapor_transport)
+        write (*, '(a)') "Enable Heat Advection: "//to_string(self%enable_heat_advection)
         write (*, '(a)') "Coupling Mode: "//strip(self%coupling_mode)
 
     end subroutine display_analysis_controls

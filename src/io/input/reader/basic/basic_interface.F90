@@ -39,6 +39,8 @@ module io_input_basic
     type :: type_analysis_controls
         logical :: is_active(IC_TARGETS%NUM_ID)
         logical :: enable_vapor_transport = .true.
+        !> Whether the heat equation carries the sensible heat of the liquid flux.
+        logical :: enable_heat_advection = .true.
         character(:), allocatable :: coupling_mode
     contains
         procedure, pass(self) :: display => display_analysis_controls

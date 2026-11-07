@@ -114,6 +114,7 @@ set(FTCMS_VERIFICATION_CASES
     jacobian_mixed
     jacobian_lagrange
     jacobian_nodal
+    jacobian_no_advection
     freezing_mixed
     freezing_nodal
     atmosphere_surface

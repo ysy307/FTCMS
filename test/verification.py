@@ -113,6 +113,12 @@ def jacobian(hydraulic: dict) -> dict:
     return case
 
 
+def no_advection(case: dict) -> dict:
+    """The same case with the heat equation carrying no liquid sensible heat."""
+    case["Basic.json"]["analysis_controls.enable_heat_advection"] = False
+    return case
+
+
 def radiation() -> dict:
     """Heat alone: 10 C at the bottom, long-wave exchange with a 0 C sky (the soil stays unfrozen) at the top."""
     case = conduction()
@@ -145,6 +151,8 @@ CASES: dict[str, tuple[str, list[dict], str]] = {
     "jacobian_mixed": ("soil-column", [jacobian(discretization("mixed", 0, "quadrature"))], "jacobian"),
     "jacobian_lagrange": ("soil-column", [jacobian(discretization("lagrange", 1, "quadrature"))], "jacobian"),
     "jacobian_nodal": ("soil-column", [jacobian(discretization("lagrange", 1, "nodal"))], "jacobian"),
+    "jacobian_no_advection": ("soil-column", [no_advection(jacobian(discretization("mixed", 0, "quadrature")))],
+                              "jacobian"),
     "atmosphere_surface": ("atmosphere-surface", [{}], "finite"),
     "refuse_mixed_heat": ("soil-column", [{"Basic.json": {"discretization_settings.thermal":
                                                           discretization("mixed", 0, "quadrature")}}],
